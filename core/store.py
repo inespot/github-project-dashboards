@@ -18,9 +18,10 @@ Manages the data/ directory. Structure:
 from __future__ import annotations
 
 import json
-from datetime import date
 from pathlib import Path
 from typing import Any
+
+from core.time import utc_today_iso
 
 _ROOT = Path("data")
 
@@ -117,7 +118,7 @@ def delete_snapshot(project_id: str, label: str) -> None:
 
 
 def today_label() -> str:
-    return date.today().isoformat()
+    return utc_today_iso()
 
 
 def proposals_dir(project_id: str) -> Path:

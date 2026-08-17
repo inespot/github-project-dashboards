@@ -109,8 +109,11 @@ def completed_in_window(
 
 def since_date(days: int) -> str:
     """Return an ISO-8601 date string `days` ago."""
-    from datetime import date, timedelta
-    return (date.today() - timedelta(days=days)).isoformat()
+    from datetime import timedelta
+
+    from core.time import utc_today
+
+    return (utc_today() - timedelta(days=days)).isoformat()
 
 
 WINDOW_OPTIONS = {

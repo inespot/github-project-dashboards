@@ -13,6 +13,7 @@ from app.components.charts import BurnupChart, ProgressBreakdown
 from app.components.empty_state import NoProjectSelected
 from app.components.selectors import MilestoneSelect, ActivityWindowSelect, ContributorsSelect
 from core import activity as activity_mod, progress as progress_mod, reconstruct, series as series_mod, store
+from core.time import utc_today, utc_today_iso
 
 
 _EMPTY_PROGRESS = {
@@ -21,6 +22,8 @@ _EMPTY_PROGRESS = {
     "percent": 0.0,
     "by_parent": [],
 }
+
+_OVERVIEW_CACHE_VERSION = "utc_v1"
 
 
 def _cached(key: tuple[object, ...], factory):
@@ -68,7 +71,7 @@ def Page():
     milestone = state.selected_milestone.value
     progress_data = (
         _cached(
-            ("progress", project_id, milestone, estimate_field),
+            (_OVERVIEW_CACHE_VERSION, "progress", project_id, milestone, estimate_field),
             lambda: progress_mod.weighted_progress_for_milestone(
                 milestone, items, estimate_field, field_values
             ),
@@ -141,7 +144,7 @@ def Page():
 @solara.component
 def _BurnupSection(project_id, milestone, estimate_field, items, timelines, field_values):
     dates = _cached(
-        ("burnup_dates", project_id),
+        (_OVERVIEW_CACHE_VERSION, "burnup_dates", project_id),
         lambda: [
             item.get("createdAt", "")[:10]
             for item in items.values()
@@ -152,14 +155,14 @@ def _BurnupSection(project_id, milestone, estimate_field, items, timelines, fiel
     start, end = (
         (
             date.fromisoformat(min(dates)),
-            date.today(),
+            utc_today(),
         )
         if dates
-        else (date.today(), date.today())
+        else (utc_today(), utc_today())
     )
 
     snapshots = _cached(
-        ("burnup_snapshots", project_id),
+        (_OVERVIEW_CACHE_VERSION, "burnup_snapshots", project_id),
         lambda: {
             label: store.read_snapshot(project_id, label)
             for label in store.list_snapshots(project_id)
@@ -167,7 +170,7 @@ def _BurnupSection(project_id, milestone, estimate_field, items, timelines, fiel
     )
 
     rows = _cached(
-        ("burnup_rows", project_id, milestone, estimate_field),
+        (_OVERVIEW_CACHE_VERSION, "burnup_rows", project_id, milestone, estimate_field),
         lambda: series_mod.burnup(
             project_id=project_id,
             milestone=milestone,
@@ -198,15 +201,15 @@ def _ActivitySection(project_id, milestone, items, timelines, field_values, esti
     since = activity_mod.since_date(days)
 
     added = _cached(
-        ("activity_added", project_id, milestone, since),
+        (_OVERVIEW_CACHE_VERSION, "activity_added", project_id, milestone, since),
         lambda: activity_mod.added_to_milestone(milestone, since, items, timelines),
     )
     completed = _cached(
-        ("activity_completed", project_id, milestone, since),
+        (_OVERVIEW_CACHE_VERSION, "activity_completed", project_id, milestone, since),
         lambda: activity_mod.completed_in_window(milestone, since, items, timelines),
     )
     added_estimate = _cached(
-        ("activity_added_estimate", project_id, milestone, since, estimate_field),
+        (_OVERVIEW_CACHE_VERSION, "activity_added_estimate", project_id, milestone, since, estimate_field),
         lambda: _sum_estimates(added, estimate_field, field_values),
     )
 
@@ -288,7 +291,7 @@ def _IssueRow(issue: dict[str, Any]):
 def _MilestoneSummary(project_id, milestone, estimate_field, items, timelines, field_values, progress_data, contributors):
     milestone_meta = (
         _cached(
-            ("milestone_meta", project_id, milestone),
+            (_OVERVIEW_CACHE_VERSION, "milestone_meta", project_id, milestone),
             lambda: _milestone_metadata(milestone, items),
         )
         if milestone not in (None, "all")
@@ -296,7 +299,7 @@ def _MilestoneSummary(project_id, milestone, estimate_field, items, timelines, f
     )
     open_estimated_days = (
         _cached(
-            ("open_estimated_days", project_id, milestone, estimate_field),
+            (_OVERVIEW_CACHE_VERSION, "open_estimated_days", project_id, milestone, estimate_field),
             lambda: _open_estimated_days(milestone, estimate_field, items, timelines, field_values),
         )
         if milestone not in (None, "all")
@@ -395,7 +398,7 @@ def _sum_estimates(issues: list[dict[str, Any]], estimate_field: str, field_valu
 
 def _open_estimated_days(milestone: str, estimate_field: str, items: dict[str, Any], timelines: dict[str, Any], field_values: dict[str, Any]) -> float:
     total = 0.0
-    at = date.today().isoformat() + "T23:59:59Z"
+    at = utc_today_iso() + "T23:59:59Z"
     for issue_id, item in items.items():
         item_milestone = (item.get("milestone") or {}).get("title")
         if item_milestone != milestone:
@@ -415,7 +418,7 @@ def _workdays_until(due_date: str | None) -> int | None:
         return None
 
     target = date.fromisoformat(due_date)
-    today = date.today()
+    today = utc_today()
     if target < today:
         return 0
 
@@ -479,6 +482,6 @@ def _take_snapshot(project_id, org, number, items, field_values):
             },
         }
     store.write_snapshot(project_id, label, {
-        "captured_at": date.today().isoformat() + "T00:00:00Z",
+        "captured_at": utc_today_iso() + "T00:00:00Z",
         "items": snapshot_items,
     })

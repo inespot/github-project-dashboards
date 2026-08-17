@@ -13,6 +13,7 @@ from app import state
 from app.components.empty_state import NoProjectSelected
 from app.components.selectors import MilestoneSelect
 from app.theme import SERIES, CHROME
+from core.time import utc_today_iso
 
 
 @solara.component
@@ -52,6 +53,7 @@ def Page(name: str = "current"):
         return
 
     config = project.get("config") or {}
+    estimate_field = config.get("estimate_field", "")
     start_field = config.get("start_field", "")
     end_field = config.get("end_field", "")
     data = state.project_data.value
@@ -96,13 +98,14 @@ def Page(name: str = "current"):
                 style="min-width: 180px; max-width: 240px;",
             )
 
-        _RoadmapTimeline(items, field_values, start_field, end_field, milestone, color_by)
+        _RoadmapTimeline(items, field_values, estimate_field, start_field, end_field, milestone, color_by)
 
 
 @solara.component
 def _RoadmapTimeline(
     items: dict[str, Any],
     field_values: dict[str, Any],
+    estimate_field: str,
     start_field: str,
     end_field: str,
     milestone: str,
@@ -115,10 +118,28 @@ def _RoadmapTimeline(
         lambda: _build_rows(items, field_values, start_field, end_field, milestone, color_by),
         [items, field_values, start_field, end_field, milestone, color_by],
     )
+    missing_dates = solara.use_memo(
+        lambda: _issues_missing_dates(items, field_values, estimate_field, start_field, end_field, milestone),
+        [items, field_values, estimate_field, start_field, end_field, milestone],
+    )
     milestone_meta = solara.use_memo(
         lambda: _milestone_metadata(milestone, items),
         [milestone, items],
     )
+
+    if missing_dates:
+        with solara.Column(gap="4px", style="margin-bottom: 16px;"):
+            solara.Text(
+                f"Tasks missing roadmap dates ({len(missing_dates)})",
+                style="font-weight: 600;",
+            )
+            for task in missing_dates[:12]:
+                _MissingDateIssueRow(task)
+            if len(missing_dates) > 12:
+                solara.Text(
+                    f"…and {len(missing_dates) - 12} more",
+                    style="font-size: 0.82rem; color: var(--color-fg-muted);",
+                )
 
     if not rows:
         if milestone == "all":
@@ -136,45 +157,45 @@ def _RoadmapTimeline(
     for row in rows:
         group = row["color_group"]
         traces.setdefault(group, {
-            "base": [],
             "x": [],
             "y": [],
             "customdata": [],
-            "marker_color": color_map[group],
+            "line_color": color_map[group],
         })
         trace = traces[group]
-        trace["base"].append(row["start"])
-        trace["x"].append(row["duration_ms"])
-        trace["y"].append(row["label"])
-        trace["customdata"].append([
+        trace["x"].extend([row["start"], row["end"], None])
+        trace["y"].extend([row["label"], row["label"], None])
+        customdata = [
             row["title"],
+            row["start"],
             row["end"],
             row["milestone"] or "",
             row["assignee_display"],
             row["status_label"],
-        ])
+        ]
+        trace["customdata"].extend([customdata, customdata, [None, None, None, None, None, None]])
 
     fig = go.Figure()
     for group, trace in traces.items():
-        fig.add_trace(go.Bar(
+        fig.add_trace(go.Scatter(
             name=group,
             x=trace["x"],
             y=trace["y"],
-            base=trace["base"],
-            orientation="h",
-            marker=dict(color=trace["marker_color"], opacity=0.9, line=dict(width=0)),
+            mode="lines",
+            line=dict(color=trace["line_color"], width=16),
             customdata=trace["customdata"],
             hovertemplate=(
                 "<b>%{customdata[0]}</b><br>"
-                "Start: %{base|%Y-%m-%d}<br>"
-                "End: %{customdata[1]}<br>"
-                "Milestone: %{customdata[2]}<br>"
-                "Assignee: %{customdata[3]}<br>"
-                "Status: %{customdata[4]}<extra>%{fullData.name}</extra>"
+                "Start: %{customdata[1]}<br>"
+                "End: %{customdata[2]}<br>"
+                "Milestone: %{customdata[3]}<br>"
+                "Assignee: %{customdata[4]}<br>"
+                "Status: %{customdata[5]}<extra>%{fullData.name}</extra>"
             ),
+            connectgaps=False,
         ))
 
-    today = dt_date.today().isoformat()
+    today = utc_today_iso()
     fig.add_vline(
         x=today,
         line_color="#d03b3b",
@@ -201,7 +222,6 @@ def _RoadmapTimeline(
 
     fig.update_layout(
         template="primer_light",
-        barmode="overlay",
         height=height,
         autosize=True,
         margin=dict(l=44, r=6, t=96, b=40),
@@ -299,6 +319,68 @@ def _build_rows(
     return sorted(rows, key=lambda row: (row["start"], row["end"], row["label"]))
 
 
+def _issues_missing_dates(
+    items: dict[str, Any],
+    field_values: dict[str, Any],
+    estimate_field: str,
+    start_field: str,
+    end_field: str,
+    milestone: str,
+) -> list[dict[str, Any]]:
+    children_by_parent: dict[int, list[str]] = {}
+    for child_id, child_item in items.items():
+        parent_number = (child_item.get("parent") or {}).get("number")
+        if parent_number is None:
+            continue
+        children_by_parent.setdefault(parent_number, []).append(child_id)
+
+    results = []
+    for issue_id, item in items.items():
+        item_milestone = (item.get("milestone") or {}).get("title")
+        if milestone != "all" and item_milestone != milestone:
+            continue
+        if _is_completed(item):
+            continue
+
+        fv = field_values.get(issue_id) or {}
+        start_value = (fv.get(start_field) or {}).get("value")
+        end_value = (fv.get(end_field) or {}).get("value")
+        if start_value and end_value:
+            continue
+
+        item_number = item.get("number")
+        child_ids = children_by_parent.get(item_number, []) if item_number is not None else []
+        if child_ids and _all_children_have_dates(child_ids, field_values, start_field, end_field):
+            continue
+
+        estimate_value = (fv.get(estimate_field) or {}).get("value") if estimate_field else None
+
+        number_label = f"#{item_number}" if item_number is not None and item_number != "" else "Item"
+        results.append({
+            "number_label": number_label,
+            "title": item.get("title", ""),
+            "url": item.get("url", ""),
+            "estimate_label": f"{float(estimate_value):.1f} days" if estimate_value is not None else "",
+        })
+
+    return sorted(results, key=lambda issue: (issue["number_label"], issue["title"]))
+
+
+def _all_children_have_dates(
+    child_ids: list[str],
+    field_values: dict[str, Any],
+    start_field: str,
+    end_field: str,
+) -> bool:
+    for child_id in child_ids:
+        fv = field_values.get(child_id) or {}
+        start_value = (fv.get(start_field) or {}).get("value")
+        end_value = (fv.get(end_field) or {}).get("value")
+        if not start_value or not end_value:
+            return False
+    return True
+
+
 def _color_map(rows: list[dict[str, Any]], color_by: str, series: dict[int, str]) -> dict[str, str]:
     groups = [row["color_group"] for row in rows]
     unique_groups = list(dict.fromkeys(groups))
@@ -341,6 +423,35 @@ def _issue_label(number_label: str, title: str, max_title_chars: int = 42) -> st
     if len(clean_title) > max_title_chars:
         clean_title = clean_title[: max_title_chars - 1].rstrip() + "…"
     return f"{number_label} {clean_title}".strip()
+
+
+@solara.component
+def _MissingDateIssueRow(issue: dict[str, str]):
+    with solara.Row(gap="8px", style="align-items: baseline; width: 100%;"):
+        if issue["url"]:
+            solara.HTML(
+                tag="a",
+                unsafe_innerHTML=issue["number_label"],
+                attributes={
+                    "href": issue["url"],
+                    "target": "_blank",
+                    "style": "color: #0969da; text-decoration: none;",
+                },
+            )
+        else:
+            solara.Text(issue["number_label"], style="color: var(--color-fg-muted);")
+        solara.Text(
+            issue["title"],
+            style=(
+                "font-size: 0.9rem; flex: 0 1 40%; min-width: 0; "
+                "white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
+            ),
+        )
+        if issue["estimate_label"]:
+            solara.Text(
+                issue["estimate_label"],
+                style="font-size: 0.82rem; font-weight: 600; width: 80px; text-align: left;",
+            )
 
 
 @solara.component
