@@ -18,6 +18,7 @@ Manages the data/ directory. Structure:
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +45,16 @@ def save_project(project: dict[str, Any]) -> None:
     existing = {p["id"]: p for p in projects}
     existing[project["id"]] = project
     _projects_file().write_text(json.dumps(list(existing.values()), indent=2))
+
+
+def delete_project(project_id: str) -> None:
+    """Remove a project from the registry and delete its local data directory."""
+    projects = [p for p in list_projects() if p["id"] != project_id]
+    _projects_file().write_text(json.dumps(projects, indent=2))
+
+    d = _ROOT / project_id
+    if d.exists():
+        shutil.rmtree(d)
 
 
 def project_dir(project_id: str) -> Path:

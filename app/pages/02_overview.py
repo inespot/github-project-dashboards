@@ -315,8 +315,8 @@ def _MilestoneSummary(project_id, milestone, estimate_field, items, timelines, f
     workdays_left = _workdays_until(due_on[:10] if due_on else None)
     estimated_days_left = max(0.0, progress_data.get("total_estimate", 0.0) - progress_data.get("done", 0.0))
     contributors_count = int(contributors)
-    fifty_rule_days = open_estimated_days * 2
-    days_per_participant = fifty_rule_days / contributors_count if contributors_count else 0.0
+    fifty_precent_rule_days = estimated_days_left * 2
+    days_per_participant = fifty_precent_rule_days / contributors_count if contributors_count else 0.0
     days_per_participant_color = _days_per_participant_color(days_per_participant, workdays_left)
 
     with solara.Column(gap="12px", style="width: 100%;"):
@@ -361,7 +361,11 @@ def _MilestoneSummary(project_id, milestone, estimate_field, items, timelines, f
                     style="font-size: 0.82rem; color: var(--color-fg-muted);",
                 )
                 solara.Text(
-                    f"{fifty_rule_days:.1f} estimate days with the 50% rule",
+                    f"{estimated_days_left:.1f} estimate days left (with progress derived from issue state)",
+                    style="font-size: 0.82rem; color: var(--color-fg-muted);",
+                )
+                solara.Text(
+                    f"{fifty_precent_rule_days:.1f} estimate days with the 50% rule",
                     style="font-size: 0.82rem; color: var(--color-fg-muted);",
                 )
                 solara.HTML(

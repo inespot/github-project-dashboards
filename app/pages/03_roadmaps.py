@@ -26,6 +26,8 @@ def Page(name: str = "current"):
 
     color_options = ["completed vs open", "assignee"]
     color_by, set_color_by = solara.use_state("completed vs open")  # noqa: SH101
+    order_options = ["start date", "end date", "assignee"]
+    order_by, set_order_by = solara.use_state("start date")  # noqa: SH101
 
     def load_data():
         if not project_id or state.project_data.value is not None or state.loading.value:
@@ -97,8 +99,15 @@ def Page(name: str = "current"):
                 on_value=set_color_by,
                 style="min-width: 180px; max-width: 240px;",
             )
+            solara.Select(
+                label="Order by",
+                value=order_by,
+                values=order_options,
+                on_value=set_order_by,
+                style="min-width: 180px; max-width: 240px;",
+            )
 
-        _RoadmapTimeline(items, field_values, estimate_field, start_field, end_field, milestone, color_by)
+        _RoadmapTimeline(items, field_values, estimate_field, start_field, end_field, milestone, color_by, order_by)
 
 
 @solara.component
@@ -110,13 +119,14 @@ def _RoadmapTimeline(
     end_field: str,
     milestone: str,
     color_by: str,
+    order_by: str,
 ):
     s = SERIES["light"]
     c = CHROME["light"]
 
     rows = solara.use_memo(
-        lambda: _build_rows(items, field_values, start_field, end_field, milestone, color_by),
-        [items, field_values, start_field, end_field, milestone, color_by],
+        lambda: _build_rows(items, field_values, start_field, end_field, milestone, color_by, order_by),
+        [items, field_values, start_field, end_field, milestone, color_by, order_by],
     )
     missing_dates = solara.use_memo(
         lambda: _issues_missing_dates(items, field_values, estimate_field, start_field, end_field, milestone),
@@ -126,6 +136,7 @@ def _RoadmapTimeline(
         lambda: _milestone_metadata(milestone, items),
         [milestone, items],
     )
+    assignee_blocks = _assignee_blocks(rows) if order_by == "assignee" else []
 
     if missing_dates:
         with solara.Column(gap="4px", style="margin-bottom: 16px;"):
@@ -218,13 +229,50 @@ def _RoadmapTimeline(
         )
 
     labels = [row["label"] for row in rows]
+    category_labels = list(reversed(labels))
+    position_by_label = {label: index for index, label in enumerate(category_labels)}
+
+    if assignee_blocks:
+        for index, block in enumerate(assignee_blocks):
+            first_pos = position_by_label.get(block["first_label"])
+            last_pos = position_by_label.get(block["last_label"])
+            if first_pos is None or last_pos is None:
+                continue
+            y0 = min(first_pos, last_pos) - 0.48
+            y1 = max(first_pos, last_pos) + 0.48
+            fig.add_hrect(
+                y0=y0,
+                y1=y1,
+                fillcolor="rgba(99,108,118,0.14)" if index % 2 == 0 else "rgba(99,108,118,0.04)",
+                line_width=0,
+                layer="below",
+            )
+            fig.add_annotation(
+                x=0.995,
+                xref="paper",
+                y=(y0 + y1) / 2,
+                yref="y",
+                text=block["assignee"],
+                showarrow=False,
+                xanchor="right",
+                yanchor="middle",
+                align="right",
+                font=dict(size=12, color=c["text_muted"]),
+                bgcolor="rgba(255,255,255,0.92)",
+                bordercolor="rgba(0,0,0,0)",
+            )
     height = max(440, 100 + len(labels) * 34)
 
     fig.update_layout(
         template="primer_light",
         height=height,
         autosize=True,
-        margin=dict(l=44, r=6, t=96, b=40),
+        margin=dict(
+            l=44,
+            r=20,
+            t=96,
+            b=40,
+        ),
         xaxis=dict(
             type="date",
             title="",
@@ -236,7 +284,7 @@ def _RoadmapTimeline(
             title_standoff=18,
             type="category",
             categoryorder="array",
-            categoryarray=list(reversed(labels)),
+            categoryarray=category_labels,
             tickfont=dict(size=11),
             automargin=True,
         ),
@@ -263,6 +311,7 @@ def _build_rows(
     end_field: str,
     milestone: str,
     color_by: str,
+    order_by: str,
 ) -> list[dict[str, Any]]:
     rows = []
     for issue_id, item in items.items():
@@ -312,10 +361,15 @@ def _build_rows(
             "duration_ms": (end_d - start_d).days * 24 * 60 * 60 * 1000,
             "milestone": item_milestone,
             "assignee_display": assignee,
+            "assignee_sort": _assignee_sort_key(assignee),
             "status_label": status_label,
             "color_group": color_group,
         })
 
+    if order_by == "end date":
+        return sorted(rows, key=lambda row: (row["end"], row["start"], row["label"]))
+    if order_by == "assignee":
+        return sorted(rows, key=lambda row: (row["assignee_sort"], row["start"], row["end"], row["label"]))
     return sorted(rows, key=lambda row: (row["start"], row["end"], row["label"]))
 
 
@@ -400,6 +454,44 @@ def _color_map(rows: list[dict[str, Any]], color_by: str, series: dict[int, str]
         color_map[group] = series.get(((next_index - 1) % 8) + 1, series[1])
         next_index += 1
     return color_map
+
+
+def _assignee_blocks(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
+    blocks: list[dict[str, str]] = []
+    current_assignee = None
+    current_first = None
+    current_last = None
+
+    for row in rows:
+        assignee = row["assignee_display"]
+        label = row["label"]
+        if assignee != current_assignee:
+            if current_assignee is not None and current_first is not None and current_last is not None:
+                blocks.append({
+                    "assignee": current_assignee,
+                    "first_label": current_first,
+                    "last_label": current_last,
+                })
+            current_assignee = assignee
+            current_first = label
+            current_last = label
+        else:
+            current_last = label
+
+    if current_assignee is not None and current_first is not None and current_last is not None:
+        blocks.append({
+            "assignee": current_assignee,
+            "first_label": current_first,
+            "last_label": current_last,
+        })
+
+    return blocks
+
+
+def _assignee_sort_key(assignee: str) -> tuple[int, str]:
+    if assignee == "(unassigned)":
+        return (1, assignee.lower())
+    return (0, assignee.lower())
 
 
 def _milestone_metadata(milestone: str, items: dict[str, Any]) -> dict[str, Any] | None:

@@ -19,6 +19,7 @@ _HAPPY_STICKMAN = Path(__file__).parent.parent.parent / "images" / "happy-stickm
 @solara.component
 def Page():
     # Connect-new-project form state (local)
+    projects_version, set_projects_version = solara.use_state(0)
     org_input, set_org_input = solara.use_state("elastic")
     number_input, set_number_input = solara.use_state("")
     connecting, set_connecting = solara.use_state(False)
@@ -53,7 +54,7 @@ def Page():
                 solara.Markdown("#### Your Projects")
                 solara.Markdown("<div style='height: 10px;'></div>")
                 for p in saved_projects:
-                    _ProjectCard(p)
+                    _ProjectCard(p, lambda: set_projects_version(lambda v: v + 1))
                 solara.HTML(tag="hr", style="margin: 24px 0; border-color: var(--color-border);")
 
             # --- Connect a new project ---
@@ -102,10 +103,12 @@ def Page():
 
 
 @solara.component
-def _ProjectCard(p: dict[str, Any]):
+def _ProjectCard(p: dict[str, Any], on_deleted):
     router = solara.use_router()
     current = state.current_project.value
     is_selected = current is not None and current.get("project_id") == p["id"]
+    deleting, set_deleting = solara.use_state(False)
+    delete_error, set_delete_error = solara.use_state("")
 
     def open_project(*_):  # v.Btn calls handler(widget, event, data) — accept and ignore
         config = store.read_config(p["id"]) or {}
@@ -123,6 +126,19 @@ def _ProjectCard(p: dict[str, Any]):
         state.clear_overview_cache()
         router.push("/overview")
 
+    def delete_project(*_):
+        set_deleting(True)
+        set_delete_error("")
+        try:
+            if is_selected:
+                state.clear_project()
+            store.delete_project(p["id"])
+            on_deleted()
+        except Exception as e:
+            set_delete_error(f"Failed to delete project: {e}")
+        finally:
+            set_deleting(False)
+
     if is_selected:
         card_style = (
             "margin-bottom: 8px; "
@@ -139,24 +155,41 @@ def _ProjectCard(p: dict[str, Any]):
     )
 
     with solara.v.Card(style_=card_style, outlined=True, elevation=0):
-        with solara.Button(
-            label="",
-            on_click=open_project,
-            text=True,
-            style=(
-                "text-transform: none; justify-content: flex-start; "
-                "padding: 12px 16px; height: auto; width: 100%;"
-            ),
+        with solara.Row(
+            justify="space-between",
+            style="align-items: center; width: 100%; padding: 6px 8px 6px 0;",
         ):
-            with solara.Row(
-                justify="space-between",
-                style="align-items: center; width: 100%; flex: 1;",
+            with solara.Button(
+                label="",
+                on_click=open_project,
+                text=True,
+                style=(
+                    "text-transform: none; justify-content: flex-start; "
+                    "padding: 12px 16px; height: auto; width: 100%; flex: 1;"
+                ),
             ):
-                solara.Text(p.get("title", p["id"]), style=title_style)
-                solara.Text(
-                    f"{p.get('org')}/projects/{p.get('number')}",
-                    style="font-size: 0.82rem; color: var(--color-fg-muted);",
-                )
+                with solara.Row(
+                    justify="space-between",
+                    style="align-items: center; width: 100%; flex: 1;",
+                ):
+                    solara.Text(p.get("title", p["id"]), style=title_style)
+                    solara.Text(
+                        f"{p.get('org')}/projects/{p.get('number')}",
+                        style="font-size: 0.82rem; color: var(--color-fg-muted);",
+                    )
+            solara.Button(
+                label="",
+                icon_name="mdi-delete-outline",
+                on_click=delete_project,
+                disabled=deleting,
+                text=True,
+                style="min-width: 36px; width: 36px; padding: 0 8px;",
+            )
+        if delete_error:
+            solara.Text(
+                delete_error,
+                style="color: var(--color-critical, #d03b3b); padding: 0 16px 12px 16px;",
+            )
 
 
 @solara.component
