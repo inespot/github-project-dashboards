@@ -22,7 +22,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from core.time import utc_today_iso
+from core.time import utc_now_filename_label, utc_now_iso, utc_today_iso
 
 _ROOT = Path("data")
 
@@ -130,6 +130,16 @@ def delete_snapshot(project_id: str, label: str) -> None:
 
 def today_label() -> str:
     return utc_today_iso()
+
+
+def now_iso() -> str:
+    """Return the current UTC datetime as ISO 8601: YYYY-MM-DDTHH:MM:SSZ."""
+    return utc_now_iso()
+
+
+def snapshot_label() -> str:
+    """Return a filename-safe UTC snapshot label with second precision."""
+    return utc_now_filename_label("snapshot")
 
 
 def proposals_dir(project_id: str) -> Path:

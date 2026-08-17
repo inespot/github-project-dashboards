@@ -76,7 +76,7 @@ def Layout(children: list = []):
                     ),
                 )
 
-                # Current roadmap
+                # Roadmaps
                 with solara.Link("/roadmaps"):
                     solara.Button(
                         "Current",
@@ -87,12 +87,28 @@ def Layout(children: list = []):
                         ),
                     )
 
-                # V1: snapshot and proposal subtabs will be rendered here
-                # by iterating store.list_snapshots(project_id) and
-                # store.list_proposals(project_id).
+                # Proposals section header
+                solara.Text(
+                    "Proposals",
+                    style=(
+                        "padding: 10px 16px 2px 16px; font-size: 0.72rem; font-weight: 600; "
+                        "color: var(--color-fg-muted); text-transform: uppercase; letter-spacing: 0.06em;"
+                    ),
+                )
+
+                with solara.Link("/proposals"):
+                    solara.Button(
+                        "Proposals",
+                        text=True,
+                        style=(
+                            "width: 100%; justify-content: flex-start; "
+                            "padding: 4px 16px 4px 24px; font-size: 0.88rem;"
+                        ),
+                    )
 
     # Page content
     solara.Column(
         children=children,
         style="flex: 1 1 auto; width: 100%; min-width: 0; max-width: none; align-self: stretch;",
     )
+

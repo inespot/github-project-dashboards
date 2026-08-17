@@ -13,7 +13,7 @@ from app.components.charts import BurnupChart, ProgressBreakdown
 from app.components.empty_state import NoProjectSelected
 from app.components.selectors import MilestoneSelect, ActivityWindowSelect, ContributorsSelect
 from core import activity as activity_mod, progress as progress_mod, reconstruct, series as series_mod, store
-from core.time import utc_today, utc_today_iso
+from core.time import utc_today
 
 
 _EMPTY_PROGRESS = {
@@ -352,7 +352,7 @@ def _MilestoneSummary(project_id, milestone, estimate_field, items, timelines, f
                 ),
             ):
                 solara.Text(
-                    "Estimated days left",
+                    "Estimated task days left",
                     style="font-size: 0.78rem; font-weight: 600; color: var(--color-fg-muted);",
                 )
                 solara.Text(f"{estimated_days_left:.1f}", style="font-size: 1.5rem; font-weight: 600;")
@@ -402,7 +402,7 @@ def _sum_estimates(issues: list[dict[str, Any]], estimate_field: str, field_valu
 
 def _open_estimated_days(milestone: str, estimate_field: str, items: dict[str, Any], timelines: dict[str, Any], field_values: dict[str, Any]) -> float:
     total = 0.0
-    at = utc_today_iso() + "T23:59:59Z"
+    at = utc_today().isoformat() + "T23:59:59Z"
     for issue_id, item in items.items():
         item_milestone = (item.get("milestone") or {}).get("title")
         if item_milestone != milestone:
@@ -466,26 +466,3 @@ def _refresh(project_id, org, number):
             state.loading.value = False
 
     threading.Thread(target=run, daemon=True).start()
-
-
-def _take_snapshot(project_id, org, number, items, field_values):
-    """Write today's snapshot (idempotent)."""
-    label = store.today_label()
-    snapshot_items = {}
-    for issue_id, item in items.items():
-        fv = field_values.get(issue_id) or {}
-        snapshot_items[issue_id] = {
-            "number": item["number"],
-            "title": item["title"],
-            "url": item["url"],
-            "state": item["state"],
-            "stateReason": item.get("stateReason"),
-            "fields": {
-                fname: {"value": entry["value"], "updatedAt": entry.get("updatedAt", "")}
-                for fname, entry in fv.items()
-            },
-        }
-    store.write_snapshot(project_id, label, {
-        "captured_at": utc_today_iso() + "T00:00:00Z",
-        "items": snapshot_items,
-    })

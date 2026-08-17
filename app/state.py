@@ -34,6 +34,9 @@ overview_cache: dict[tuple[Hashable, ...], Any] = {}
 # component rendering context (not from a background thread, which won't work).
 pending_route: solara.Reactive[str] = solara.reactive("")
 
+# Which roadmap view is shown: "current" or a snapshot label ("YYYY-MM-DD").
+roadmap_view: solara.Reactive[str] = solara.reactive("current")
+
 
 def clear_overview_cache() -> None:
     overview_cache.clear()

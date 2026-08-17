@@ -13,21 +13,33 @@ from app import state
 from app.components.empty_state import NoProjectSelected
 from app.components.selectors import MilestoneSelect
 from app.theme import SERIES, CHROME
+from core import store
 from core.time import utc_today_iso
 
 
 @solara.component
 def Page(name: str = "current"):
-    """Dynamic page — `name` is the roadmap variant: 'current' or a snapshot label."""
+    """Roadmap page — shows live data or a frozen snapshot depending on state.roadmap_view."""
     project = state.current_project.value
     project_id = (project or {}).get("project_id", "")
     org = (project or {}).get("org", "")
     number = (project or {}).get("number", 0)
 
+    # All hooks before any early return.
     color_options = ["completed vs open", "assignee"]
     color_by, set_color_by = solara.use_state("completed vs open")  # noqa: SH101
     order_options = ["start date", "end date", "assignee"]
     order_by, set_order_by = solara.use_state("start date")  # noqa: SH101
+    snapshot_taken, set_snapshot_taken = solara.use_state(False)  # noqa: SH101
+
+    def _auto_dismiss_snapshot():
+        if not snapshot_taken:
+            return
+        t = threading.Timer(2.0, lambda: set_snapshot_taken(False))
+        t.start()
+        return t.cancel
+
+    solara.use_effect(_auto_dismiss_snapshot, [snapshot_taken])  # noqa: SH101
 
     def load_data():
         if not project_id or state.project_data.value is not None or state.loading.value:
@@ -38,7 +50,6 @@ def Page(name: str = "current"):
         def run():
             try:
                 from core import timeline as tl
-
                 result = tl.load(project_id, org, number)
                 state.project_data.value = result
             except Exception as e:
@@ -58,13 +69,41 @@ def Page(name: str = "current"):
     estimate_field = config.get("estimate_field", "")
     start_field = config.get("start_field", "")
     end_field = config.get("end_field", "")
-    data = state.project_data.value
+    view = state.roadmap_view.value          # "current" or a snapshot label
+    live_data = state.project_data.value
     loading = state.loading.value
     error = state.error.value
 
+    # Build the view options: "Current" + snapshots (newest first).
+    # Proposals live on their own page.
+    snapshot_labels = store.list_snapshots(project_id)
+    _VIEW_CURRENT = "Current"
+    view_options = [_VIEW_CURRENT] + snapshot_labels
+
+    # Map reactive value → display label and back.
+    view_display = _VIEW_CURRENT if view == "current" else view
+
+    def on_view_change(selected: str) -> None:
+        state.roadmap_view.value = "current" if selected == _VIEW_CURRENT else selected
+
     with solara.Column(style="padding: 24px; width: 100%; min-width: 0;"):
-        with solara.Row(justify="space-between", style="align-items: center;"):
+        with solara.Row(justify="space-between", style="align-items: center; margin-bottom: 4px;"):
             solara.Markdown(f"## Roadmap — {project.get('title', '')}")
+            if view == "current":
+                with solara.Column(gap="8px", style="align-items: flex-end;"):
+                    solara.Button(
+                        "Take snapshot",
+                        outlined=True,
+                        disabled=live_data is None,
+                        on_click=lambda: _do_take_snapshot(
+                            project_id, live_data, set_snapshot_taken
+                        ),
+                    )
+                    if snapshot_taken:
+                        solara.Text(
+                            "✓ Snapshot saved",
+                            style="font-size: 0.82rem; color: #1baf7a; font-weight: 600;",
+                        )
 
         if not start_field or not end_field:
             solara.Text(
@@ -74,23 +113,39 @@ def Page(name: str = "current"):
             )
             return
 
-        if loading:
-            solara.ProgressLinear(True)
-            solara.Text("Fetching issues and timelines...", style="color: var(--color-fg-muted);")
-            return
+        # --- Resolve items and field_values ---
+        if view == "current":
+            if loading:
+                solara.ProgressLinear(True)
+                solara.Text("Fetching issues and timelines...", style="color: var(--color-fg-muted);")
+                return
+            if error:
+                solara.Text(f"Error: {error}", style="color: var(--color-critical, #d03b3b);")
+                return
+            if live_data is None:
+                return
+            items = live_data["items"]
+            field_values = live_data["field_values"]
+        else:
+            snap = store.read_snapshot(project_id, view)
+            if snap is None:
+                solara.Text(
+                    f"Snapshot '{view}' not found.",
+                    style="color: var(--color-critical, #d03b3b);",
+                )
+                return
+            items, field_values = _snapshot_to_items_and_fields(snap)
 
-        if error:
-            solara.Text(f"Error: {error}", style="color: var(--color-critical, #d03b3b);")
-            return
-
-        if data is None:
-            return
-
-        items = data["items"]
-        field_values = data["field_values"]
         milestone = state.selected_milestone.value
 
         with solara.Row(gap="12px", style="align-items: flex-end; margin-bottom: 16px;"):
+            solara.Select(
+                label="View",
+                value=view_display,
+                values=view_options,
+                on_value=on_view_change,
+                style="min-width: 180px; max-width: 260px;",
+            )
             MilestoneSelect(items)
             solara.Select(
                 label="Color by",
@@ -544,6 +599,60 @@ def _MissingDateIssueRow(issue: dict[str, str]):
                 issue["estimate_label"],
                 style="font-size: 0.82rem; font-weight: 600; width: 80px; text-align: left;",
             )
+
+
+# ---------------------------------------------------------------------------
+# Snapshot helpers
+# ---------------------------------------------------------------------------
+
+def _do_take_snapshot(project_id: str, live_data: dict | None, set_taken) -> None:
+    """Write today's snapshot from live data and flash the confirmation badge."""
+    if not live_data:
+        return
+    label = store.snapshot_label()
+    items = live_data["items"]
+    field_values = live_data["field_values"]
+    snapshot_items = {}
+    for issue_id, item in items.items():
+        fv = field_values.get(issue_id) or {}
+        snapshot_items[issue_id] = {
+            "number": item.get("number"),
+            "title": item.get("title"),
+            "url": item.get("url"),
+            "state": item.get("state"),
+            "stateReason": item.get("stateReason"),
+            "fields": {
+                fname: {"value": entry["value"], "updatedAt": entry.get("updatedAt", "")}
+                for fname, entry in fv.items()
+            },
+        }
+    store.write_snapshot(project_id, label, {
+        "captured_at": store.now_iso(),
+        "items": snapshot_items,
+    })
+    set_taken(True)
+
+
+def _snapshot_to_items_and_fields(
+    snap: dict,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Convert a snapshot dict into (items, field_values) matching the live data shape."""
+    items: dict[str, Any] = {}
+    field_values: dict[str, Any] = {}
+    for issue_id, entry in snap.get("items", {}).items():
+        items[issue_id] = {
+            "number": entry.get("number"),
+            "title": entry.get("title", ""),
+            "url": entry.get("url", ""),
+            "state": entry.get("state", "OPEN"),
+            "stateReason": entry.get("stateReason"),
+            # Snapshots don't store milestone/assignees, so these default to None.
+            "milestone": None,
+            "assignees": [],
+            "parent": None,
+        }
+        field_values[issue_id] = entry.get("fields", {})
+    return items, field_values
 
 
 @solara.component
