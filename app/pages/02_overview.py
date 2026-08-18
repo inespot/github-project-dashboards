@@ -226,7 +226,7 @@ def _ActivitySection(project_id, milestone, items, timelines, field_values, esti
         )
         if added:
             for issue in added[:10]:
-                _IssueRow(issue)
+                _IssueRow(issue, estimate_field=estimate_field, field_values=field_values)
             if len(added) > 10:
                 solara.Text(f"…and {len(added) - 10} more", style="color: var(--color-fg-muted); font-size: 0.82rem;")
         else:
@@ -240,7 +240,7 @@ def _ActivitySection(project_id, milestone, items, timelines, field_values, esti
         )
         if completed:
             for issue in completed[:10]:
-                _IssueRow(issue)
+                _IssueRow(issue, estimate_field=estimate_field, field_values=field_values)
             if len(completed) > 10:
                 solara.Text(f"…and {len(completed) - 10} more", style="color: var(--color-fg-muted); font-size: 0.82rem;")
         else:
@@ -248,12 +248,29 @@ def _ActivitySection(project_id, milestone, items, timelines, field_values, esti
 
 
 @solara.component
-def _IssueRow(issue: dict[str, Any]):
+def _IssueRow(
+    issue: dict[str, Any],
+    estimate_field: str = "",
+    field_values: dict[str, Any] | None = None,
+):
     url = issue.get("url", "")
     number = issue.get("number", "")
     title = issue.get("title", "")
     at = (issue.get("at") or "")[:10]
+    show_estimate = bool(estimate_field and field_values is not None)
+    estimate_label = ""
+    if show_estimate:
+        issue_id = issue.get("id")
+        if issue_id:
+            entry = (field_values.get(issue_id) or {}).get(estimate_field)
+            value = entry.get("value") if entry else None
+            if value is not None:
+                estimate_label = f"{float(value):.1f} days"
     number_label = f"#{number}" if number is not None and number != "" else "Item"
+    meta_style = (
+        "font-size: 0.78rem; color: var(--color-fg-muted); "
+        "white-space: nowrap; text-align: left;"
+    )
 
     with solara.Row(
         gap="8px",
@@ -278,13 +295,9 @@ def _IssueRow(issue: dict[str, Any]):
                 "white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
             ),
         )
-        solara.Text(
-            at,
-            style=(
-                "font-size: 0.78rem; color: var(--color-fg-muted); "
-                "white-space: nowrap; width: 88px; text-align: left;"
-            ),
-        )
+        solara.Text(at, style=f"{meta_style} width: 88px;")
+        if show_estimate:
+            solara.Text(estimate_label, style=f"{meta_style} width: 72px;")
 
 
 @solara.component
@@ -387,16 +400,29 @@ def _milestone_metadata(milestone: str, items: dict[str, Any]) -> dict[str, Any]
     return None
 
 
+def _issue_estimate(
+    issue: dict[str, Any],
+    estimate_field: str,
+    field_values: dict[str, Any],
+) -> float | None:
+    if not estimate_field:
+        return None
+    issue_id = issue.get("id")
+    if not issue_id:
+        return None
+    entry = (field_values.get(issue_id) or {}).get(estimate_field)
+    value = entry.get("value") if entry else None
+    if value is None:
+        return None
+    return float(value)
+
+
 def _sum_estimates(issues: list[dict[str, Any]], estimate_field: str, field_values: dict[str, Any]) -> float:
     total = 0.0
     for issue in issues:
-        issue_id = issue.get("id")
-        if not issue_id:
-            continue
-        entry = (field_values.get(issue_id) or {}).get(estimate_field)
-        value = entry.get("value") if entry else None
+        value = _issue_estimate(issue, estimate_field, field_values)
         if value is not None:
-            total += float(value)
+            total += value
     return total
 
 
