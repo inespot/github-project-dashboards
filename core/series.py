@@ -1,10 +1,13 @@
 """Burn-up series derivation.
 
 Produces a daily series of:
-  date, scope, completed, remaining, added, confidence
+  date, scope, completed, in_progress, todo, remaining, added, confidence
 
-where confidence is "exact" if all estimates for that date are exact,
-"partial" if some are assumed, or "assumed" if all are assumed.
+where:
+  - completed + in_progress + todo == scope (stacked status buckets)
+  - remaining == scope - completed (legacy gap metric)
+  - confidence is "exact" if all estimates for that date are exact,
+    "partial" if some are assumed, or "assumed" if all are assumed
 
 Designed to be used with Polars DataFrames but returns plain dicts so
 tests have no Polars dependency.
@@ -31,7 +34,7 @@ def burnup(
 ) -> list[dict[str, Any]]:
     """Return a list of daily row dicts for the burn-up chart.
 
-    Each row: date, scope, completed, remaining, added, confidence
+    Each row: date, scope, completed, in_progress, todo, remaining, added, confidence
     """
     rows: list[dict[str, Any]] = []
     prev_scope = 0.0
@@ -42,6 +45,7 @@ def burnup(
 
         scope = 0.0
         completed = 0.0
+        in_progress = 0.0
         confidences = []
 
         for issue_id, item in items.items():
@@ -73,6 +77,10 @@ def burnup(
 
             if reconstruct.is_completed(state):
                 completed += est_float
+            elif reconstruct.is_in_progress(state):
+                in_progress += est_float
+
+        todo = scope - completed - in_progress
 
         if not confidences:
             confidence = "assumed"
@@ -88,6 +96,8 @@ def burnup(
             "date": date_str,
             "scope": scope,
             "completed": completed,
+            "in_progress": in_progress,
+            "todo": todo,
             "remaining": scope - completed,
             "added": added,
             "confidence": confidence,

@@ -13,8 +13,25 @@ from app import state
 from app.components.empty_state import NoProjectSelected
 from app.components.selectors import MilestoneSelect
 from app.theme import SERIES, CHROME
-from core import store
+from core import people, store
 from core.time import utc_today_iso
+
+
+def _snapshot_date_display(label: str) -> str:
+    """Turn a snapshot file label into a short date/time for the View dropdown.
+
+    Labels look like ``snapshot-2026-08-17T10:40:33Z`` or the filename-safe
+    ``snapshot-2026-08-17T10-40-33Z``. Display as ``2026-08-17 10:40 UTC``.
+    """
+    raw = label[len("snapshot-") :] if label.startswith("snapshot-") else label
+    raw = raw.rstrip("Z")
+    if "T" in raw:
+        day, time_part = raw.split("T", 1)
+        # Filename-safe labels use hyphens in the time segment.
+        time_part = time_part.replace("-", ":")
+        hhmm = time_part[:5] if len(time_part) >= 5 else time_part
+        return f"{day} {hhmm} UTC"
+    return raw
 
 
 @solara.component
@@ -44,13 +61,20 @@ def Page(name: str = "current"):
     def load_data():
         if not project_id or state.project_data.value is not None or state.loading.value:
             return
+
+        from core import timeline as tl
+
+        local = tl.read_local(project_id)
+        if local is not None:
+            state.project_data.value = local
+
         state.loading.value = True
         state.error.value = None
 
         def run():
             try:
-                from core import timeline as tl
                 result = tl.load(project_id, org, number)
+                state.clear_overview_cache()
                 state.project_data.value = result
             except Exception as e:
                 state.error.value = str(e)
@@ -74,17 +98,41 @@ def Page(name: str = "current"):
     loading = state.loading.value
     error = state.error.value
 
-    # Build the view options: "Current" + snapshots (newest first).
-    # Proposals live on their own page.
+    # Build the view options: "Current" + snapshots + proposals.
+    # Snapshot labels start with "snapshot-"; proposal labels are user-defined.
     snapshot_labels = store.list_snapshots(project_id)
+    proposal_labels = store.list_proposals(project_id)
     _VIEW_CURRENT = "Current"
-    view_options = [_VIEW_CURRENT] + snapshot_labels
+    _SNAPSHOT_PREFIX = "Snapshot: "
+    _PROPOSAL_PREFIX = "Proposal: "
 
-    # Map reactive value → display label and back.
-    view_display = _VIEW_CURRENT if view == "current" else view
+    # Display strings for the dropdown.
+    _snapshot_options = [
+        f"{_SNAPSHOT_PREFIX}{_snapshot_date_display(lbl)}" for lbl in snapshot_labels
+    ]
+    _proposal_options = [f"{_PROPOSAL_PREFIX}{p}" for p in proposal_labels]
+    view_options = [_VIEW_CURRENT] + _snapshot_options + _proposal_options
+    _snapshot_by_display = dict(zip(_snapshot_options, snapshot_labels))
+
+    # Map state value → display string.
+    if view == "current":
+        view_display = _VIEW_CURRENT
+    elif view in proposal_labels:
+        view_display = f"{_PROPOSAL_PREFIX}{view}"
+    elif view in snapshot_labels:
+        view_display = f"{_SNAPSHOT_PREFIX}{_snapshot_date_display(view)}"
+    else:
+        view_display = view
 
     def on_view_change(selected: str) -> None:
-        state.roadmap_view.value = "current" if selected == _VIEW_CURRENT else selected
+        if selected == _VIEW_CURRENT:
+            state.roadmap_view.value = "current"
+        elif selected.startswith(_PROPOSAL_PREFIX):
+            state.roadmap_view.value = selected[len(_PROPOSAL_PREFIX):]
+        elif selected in _snapshot_by_display:
+            state.roadmap_view.value = _snapshot_by_display[selected]
+        else:
+            state.roadmap_view.value = selected
 
     with solara.Column(style="padding: 24px; width: 100%; min-width: 0;"):
         with solara.Row(justify="space-between", style="align-items: center; margin-bottom: 4px;"):
@@ -115,26 +163,43 @@ def Page(name: str = "current"):
 
         # --- Resolve items and field_values ---
         if view == "current":
-            if loading:
+            if loading and live_data is None:
                 solara.ProgressLinear(True)
                 solara.Text("Fetching issues and timelines...", style="color: var(--color-fg-muted);")
                 return
-            if error:
+            if error and live_data is None:
                 solara.Text(f"Error: {error}", style="color: var(--color-critical, #d03b3b);")
                 return
             if live_data is None:
                 return
+            if loading:
+                solara.ProgressLinear(True)
+                solara.Text(
+                    "Refreshing issues and timelines...",
+                    style="color: var(--color-fg-muted); margin-bottom: 8px;",
+                )
+            if error:
+                solara.Text(
+                    f"Refresh failed: {error}",
+                    style="color: var(--color-critical, #d03b3b); margin-bottom: 8px;",
+                )
             items = live_data["items"]
             field_values = live_data["field_values"]
         else:
-            snap = store.read_snapshot(project_id, view)
-            if snap is None:
+            # Snapshot labels start with "snapshot-"; anything else is a proposal.
+            if view.startswith("snapshot-"):
+                data = store.read_snapshot(project_id, view)
+                kind = "Snapshot"
+            else:
+                data = store.read_proposal(project_id, view)
+                kind = "Proposal"
+            if data is None:
                 solara.Text(
-                    f"Snapshot '{view}' not found.",
+                    f"{kind} '{view}' not found.",
                     style="color: var(--color-critical, #d03b3b);",
                 )
                 return
-            items, field_values = _snapshot_to_items_and_fields(snap)
+            items, field_values = _snapshot_to_items_and_fields(data)
 
         milestone = state.selected_milestone.value
 
@@ -144,7 +209,7 @@ def Page(name: str = "current"):
                 value=view_display,
                 values=view_options,
                 on_value=on_view_change,
-                style="min-width: 180px; max-width: 260px;",
+                style="min-width: 200px; max-width: 320px;",
             )
             MilestoneSelect(items)
             solara.Select(
@@ -395,7 +460,8 @@ def _build_rows(
             end_d = start_d + timedelta(days=1)
 
         assignees = item.get("assignees") or []
-        assignee = assignees[0] if assignees else "(unassigned)"
+        login = assignees[0] if assignees else None
+        assignee = people.display_name(login) if login else "(unassigned)"
         status_label = "Completed" if _is_completed(item) else "Open"
         number = item.get("number")
         number_label = f"#{number}" if number is not None and number != "" else "Item"
@@ -640,18 +706,30 @@ def _snapshot_to_items_and_fields(
     items: dict[str, Any] = {}
     field_values: dict[str, Any] = {}
     for issue_id, entry in snap.get("items", {}).items():
+        fields = entry.get("fields", {})
+        milestone = None
+        project_status = None
+        for name, field_entry in fields.items():
+            value = (field_entry or {}).get("value")
+            if not value:
+                continue
+            lower = name.lower()
+            if lower == "milestone" and milestone is None:
+                milestone = {"title": str(value)}
+            elif lower == "status" and project_status is None:
+                project_status = str(value)
         items[issue_id] = {
             "number": entry.get("number"),
             "title": entry.get("title", ""),
             "url": entry.get("url", ""),
             "state": entry.get("state", "OPEN"),
             "stateReason": entry.get("stateReason"),
-            # Snapshots don't store milestone/assignees, so these default to None.
-            "milestone": None,
+            "milestone": milestone,
+            "project_status": project_status,
             "assignees": [],
             "parent": None,
         }
-        field_values[issue_id] = entry.get("fields", {})
+        field_values[issue_id] = fields
     return items, field_values
 
 

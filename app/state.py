@@ -21,6 +21,13 @@ project_data: solara.Reactive[dict[str, Any] | None] = solara.reactive(None)
 # Loading / error state
 loading: solara.Reactive[bool] = solara.reactive(False)
 error: solara.Reactive[str | None] = solara.reactive(None)
+# Soft notice when showing disk/cached data because a live fetch was skipped.
+warning: solara.Reactive[str | None] = solara.reactive(None)
+
+# Bumps when background PR prefetch for Overview finishes (forces re-render).
+overview_prs_ready: solara.Reactive[int] = solara.reactive(0)
+# Bumps when background review-awards fetch finishes.
+overview_reviews_ready: solara.Reactive[int] = solara.reactive(0)
 
 # Overview filters
 selected_milestone: solara.Reactive[str] = solara.reactive("all")
@@ -40,6 +47,8 @@ roadmap_view: solara.Reactive[str] = solara.reactive("current")
 
 def clear_overview_cache() -> None:
     overview_cache.clear()
+    overview_prs_ready.value = 0
+    overview_reviews_ready.value = 0
 
 
 def overview_cache_get_or_set(key: tuple[Hashable, ...], factory: Callable[[], Any]) -> Any:
@@ -52,6 +61,7 @@ def clear_project() -> None:
     current_project.value = None
     project_data.value = None
     error.value = None
+    warning.value = None
     selected_milestone.value = "all"
     contributors_count.value = "1"
     clear_overview_cache()

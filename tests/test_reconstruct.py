@@ -1,6 +1,6 @@
 """Tests for core.reconstruct — pure, no network."""
 
-from core.reconstruct import state_at, is_completed, IssueState
+from core.reconstruct import state_at, is_completed, is_in_progress, IssueState
 
 ISSUE = {"id": "I_1", "number": 1, "title": "Test", "url": "", "state": "OPEN",
          "stateReason": None, "createdAt": "2026-01-01T00:00:00Z", "closedAt": None,
@@ -84,5 +84,24 @@ def test_project_status_changes():
     ]
     s = state_at(ISSUE, events, "2026-02-05T00:00:00Z")
     assert s.project_status == "In Progress"
+    assert is_in_progress(s)
+    assert not is_completed(s)
     s2 = state_at(ISSUE, events, "2026-02-15T00:00:00Z")
     assert s2.project_status == "Done"
+    assert is_completed(s2)
+    assert not is_in_progress(s2)
+
+
+def test_is_in_progress_excludes_todo_and_blocked():
+    todo = IssueState(
+        issue_id="I_1", open=True, close_reason=None, milestone=None,
+        assignees=[], labels=[], parent_number=None,
+        project_status="Todo", in_project=True,
+    )
+    blocked = IssueState(
+        issue_id="I_1", open=True, close_reason=None, milestone=None,
+        assignees=[], labels=[], parent_number=None,
+        project_status="Blocked", in_project=True,
+    )
+    assert not is_in_progress(todo)
+    assert not is_in_progress(blocked)

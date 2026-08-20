@@ -121,3 +121,15 @@ def state_at(
 def is_completed(state: IssueState) -> bool:
     """An issue counts as completed when closed with reason COMPLETED."""
     return state.close_reason == "COMPLETED" or state.project_status == "Done"
+
+
+def is_in_progress(state: IssueState) -> bool:
+    """An issue counts as in-progress via project Status (not yet completed).
+
+    Matches the status string used by core.progress._project_status_credit.
+    Blocked is intentionally excluded for now.
+    """
+    if is_completed(state):
+        return False
+    status = (state.project_status or "").lower()
+    return status == "in progress"

@@ -16,23 +16,31 @@ def MilestoneSelect(items: dict[str, Any]):
     milestones: set[str] = set()
     for item in items.values():
         m = item.get("milestone")
-        if m:
+        if m and m.get("title"):
             milestones.add(m["title"])
 
     options = ["all"] + sorted(milestones)
+    options_key = tuple(options)
     current_value = state.selected_milestone.value
+    select_value = current_value if current_value in options else "all"
 
     def normalize_selected_milestone():
-        if current_value not in options:
+        # Only when the available milestones change — not on every selection.
+        # Running this on current_value races Solara Select and snaps back to "all".
+        if state.selected_milestone.value not in options_key:
             state.selected_milestone.value = "all"
 
-    solara.use_effect(normalize_selected_milestone, [current_value, *options])  # noqa: SH101
+    solara.use_effect(normalize_selected_milestone, [options_key])  # noqa: SH101
+
+    def on_milestone(selected: str) -> None:
+        if selected in options_key:
+            state.selected_milestone.value = selected
 
     solara.Select(
         label="Milestone",
-        value=current_value if current_value in options else "all",
+        value=select_value,
         values=options,
-        on_value=lambda v: setattr(state.selected_milestone, "value", v),
+        on_value=on_milestone,
         style="min-width: 220px; max-width: 320px;",
     )
 

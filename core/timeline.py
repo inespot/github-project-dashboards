@@ -16,9 +16,13 @@ Normalised output: list of Event dicts with keys:
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from core import github, store
+
+# Cap concurrent timeline GraphQL fetches to stay polite to the API.
+_TIMELINE_FETCH_WORKERS = 4
 
 # ---------------------------------------------------------------------------
 # GraphQL
@@ -156,6 +160,26 @@ query IssueTimeline($id: ID!, $after: String) {
 # Public API
 # ---------------------------------------------------------------------------
 
+def read_local(project_id: str) -> dict[str, Any] | None:
+    """Return the on-disk project cache if it is complete enough to render.
+
+    Used to show Overview/Roadmaps immediately while a network refresh runs.
+    Re-applies Status from field_values onto items so project_status stays
+    aligned with the latest cached Status field.
+    """
+    items = store.read_cache(project_id, "items")
+    timelines = store.read_cache(project_id, "timelines")
+    field_values = store.read_cache(project_id, "field_values")
+    if not items or timelines is None or field_values is None:
+        return None
+    _sync_project_status_from_fields(items, field_values)
+    return {
+        "items": items,
+        "timelines": timelines,
+        "field_values": field_values,
+    }
+
+
 def load(project_id: str, org: str, number: int, force: bool = False) -> dict[str, Any]:
     """Fetch or update the project item and timeline cache.
 
@@ -169,6 +193,7 @@ def load(project_id: str, org: str, number: int, force: bool = False) -> dict[st
 
     items: dict[str, Any] = {}
     field_values: dict[str, dict[str, Any]] = {}
+    timelines_to_fetch: list[str] = []
 
     for node in github.paginate(
         _ITEMS_QUERY,
@@ -189,23 +214,48 @@ def load(project_id: str, org: str, number: int, force: bool = False) -> dict[st
         if fetch_timeline:
             cached_updated = (cached_items.get(item_id) or {}).get("updatedAt", "")
             if force or item["updatedAt"] != cached_updated or item_id not in cached_timelines:
-                cached_timelines[item_id] = _fetch_timeline(item_id)
+                timelines_to_fetch.append(item_id)
         elif item_id not in cached_timelines or force:
             cached_timelines[item_id] = []
+
+    if timelines_to_fetch:
+        fetched = _fetch_timelines_parallel(timelines_to_fetch)
+        cached_timelines.update(fetched)
 
     timelines = {
         item_id: cached_timelines.get(item_id, [])
         for item_id in items
     }
 
+    _sync_project_status_from_fields(items, field_values)
+
     store.write_cache(project_id, "items", items)
     store.write_cache(project_id, "timelines", timelines)
+    store.write_cache(project_id, "field_values", field_values)
 
     return {
         "items": items,
         "timelines": timelines,
         "field_values": field_values,
     }
+
+
+def _fetch_timelines_parallel(issue_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+    """Fetch issue timelines concurrently (capped worker pool)."""
+    if not issue_ids:
+        return {}
+    if len(issue_ids) == 1:
+        iid = issue_ids[0]
+        return {iid: _fetch_timeline(iid)}
+
+    results: dict[str, list[dict[str, Any]]] = {}
+    workers = min(_TIMELINE_FETCH_WORKERS, len(issue_ids))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_fetch_timeline, iid): iid for iid in issue_ids}
+        for fut in as_completed(futures):
+            iid = futures[fut]
+            results[iid] = fut.result()
+    return results
 
 
 def _normalise_project_item(
@@ -357,6 +407,17 @@ def _status_from_field_values(fv: dict[str, Any]) -> str | None:
         if field_name.lower() == "status" and entry.get("value"):
             return str(entry["value"])
     return None
+
+
+def _sync_project_status_from_fields(
+    items: dict[str, Any],
+    field_values: dict[str, Any],
+) -> None:
+    """Keep ``item["project_status"]`` aligned with the Status field value."""
+    for issue_id, item in items.items():
+        status = _status_from_field_values(field_values.get(issue_id) or {})
+        if status is not None:
+            item["project_status"] = status
 
 
 def _fetch_timeline(issue_id: str) -> list[dict[str, Any]]:

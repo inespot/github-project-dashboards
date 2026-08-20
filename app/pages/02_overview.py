@@ -9,10 +9,10 @@ from typing import Any
 import solara
 
 from app import state
-from app.components.charts import BurnupChart, ProgressBreakdown
+from app.components.charts import BurnupChart, ProgressByParent, ProgressSummary
 from app.components.empty_state import NoProjectSelected
 from app.components.selectors import MilestoneSelect, ActivityWindowSelect, ContributorsSelect
-from core import activity as activity_mod, progress as progress_mod, reconstruct, series as series_mod, store
+from core import activity as activity_mod, people, progress as progress_mod, reconstruct, reviews as reviews_mod, roadmap as roadmap_mod, series as series_mod, store
 from core.time import utc_today
 
 
@@ -23,11 +23,24 @@ _EMPTY_PROGRESS = {
     "by_parent": [],
 }
 
-_OVERVIEW_CACHE_VERSION = "utc_v1"
+_OVERVIEW_CACHE_VERSION = "utc_v18_awards_disk_status_sync"
+
+_CARD_STYLE = (
+    "padding: 12px 14px; border: 1px solid var(--color-border); "
+    "border-radius: 8px; background: var(--color-canvas-subtle); "
+    "width: 100%; height: 100%; box-sizing: border-box;"
+)
+
+_HALF_CARD = "flex: 1 1 calc(50% - 6px); min-width: 140px;"
 
 
 def _cached(key: tuple[object, ...], factory):
     return state.overview_cache_get_or_set(key, factory)
+
+
+_RATE_LIMIT_CACHE_WARNING = (
+    "GitHub rate limits reached. Using data from disk cache only."
+)
 
 
 @solara.component
@@ -41,20 +54,45 @@ def Page():
     org = (project or {}).get("org", "")
     number = (project or {}).get("number", 0)
     estimate_field = config.get("estimate_field", "")
+    start_field = config.get("start_field", "")
+    end_field = config.get("end_field", "")
 
     def load_data():
         if not project_id or state.project_data.value is not None or state.loading.value:
             return
+
+        from core import timeline as tl
+
+        # Show disk cache immediately (if complete), then refresh from GitHub.
+        local = tl.read_local(project_id)
+        if local is not None:
+            state.project_data.value = local
+
         state.loading.value = True
         state.error.value = None
+        state.warning.value = None
 
         def run():
             try:
+                from core import github as gh
                 from core import timeline as tl
+
+                # If quota is gone, stay on disk cache instead of hanging/failing.
+                if not gh.has_budget(30):
+                    if local is None:
+                        state.error.value = _RATE_LIMIT_CACHE_WARNING
+                    else:
+                        state.warning.value = _RATE_LIMIT_CACHE_WARNING
+                    return
                 result = tl.load(project_id, org, number)
+                state.clear_overview_cache()
                 state.project_data.value = result
+                state.warning.value = None
             except Exception as e:
-                state.error.value = str(e)
+                if local is None:
+                    state.error.value = str(e)
+                else:
+                    state.warning.value = _RATE_LIMIT_CACHE_WARNING
             finally:
                 state.loading.value = False
 
@@ -65,15 +103,97 @@ def Page():
     data = state.project_data.value
     loading = state.loading.value
     error = state.error.value
+    warning = state.warning.value
     items = data["items"] if data else {}
     timelines = data["timelines"] if data else {}
     field_values = data["field_values"] if data else {}
     milestone = state.selected_milestone.value
+    prs_ready = state.overview_prs_ready.value
+    pr_by_issue = state.overview_cache.get(("prs", project_id))
+
+    def prefetch_overview_prs():
+        if data is None or not project_id:
+            return
+        if ("prs", project_id) in state.overview_cache:
+            return
+
+        def run():
+            from core import github as gh
+
+            try:
+                # PR progress is nice-to-have; stay on Status-only when quota is low.
+                if not gh.has_budget(80):
+                    state.overview_cache[("prs", project_id)] = {}
+                    state.warning.value = _RATE_LIMIT_CACHE_WARNING
+                else:
+                    ids = progress_mod.open_issue_ids_needing_prs(items)
+                    state.overview_cache[("prs", project_id)] = progress_mod.prefetch_prs(ids)
+            except Exception:
+                state.overview_cache[("prs", project_id)] = {}
+                state.warning.value = _RATE_LIMIT_CACHE_WARNING
+            state.overview_prs_ready.value = state.overview_prs_ready.value + 1
+
+        threading.Thread(target=run, daemon=True).start()
+
+    solara.use_effect(
+        prefetch_overview_prs,
+        [project_id, id(data) if data is not None else 0],
+    )  # noqa: SH101
+
+    def prefetch_review_awards():
+        if data is None or not project_id:
+            return
+        cache_key = ("review_awards", _OVERVIEW_CACHE_VERSION, project_id)
+        if cache_key in state.overview_cache:
+            return
+
+        # Prefer disk cache — do not burn rate limit re-fetching awards every load.
+        local_awards = reviews_mod.read_local_awards(project_id)
+        if local_awards is not None:
+            state.overview_cache[cache_key] = local_awards
+            state.overview_reviews_ready.value = state.overview_reviews_ready.value + 1
+            return
+
+        def run():
+            from core import github as gh
+
+            try:
+                if not gh.has_budget(100):
+                    state.overview_cache[cache_key] = []
+                    state.warning.value = _RATE_LIMIT_CACHE_WARNING
+                else:
+                    awards = reviews_mod.review_awards(items, project_id=project_id)
+                    state.overview_cache[cache_key] = awards
+            except Exception:
+                if cache_key not in state.overview_cache:
+                    state.overview_cache[cache_key] = []
+                state.warning.value = _RATE_LIMIT_CACHE_WARNING
+            state.overview_reviews_ready.value = state.overview_reviews_ready.value + 1
+
+        threading.Thread(target=run, daemon=True).start()
+
+    solara.use_effect(
+        prefetch_review_awards,
+        [project_id, id(data) if data is not None else 0],
+    )  # noqa: SH101
+
     progress_data = (
         _cached(
-            (_OVERVIEW_CACHE_VERSION, "progress", project_id, milestone, estimate_field),
+            (
+                _OVERVIEW_CACHE_VERSION,
+                "progress",
+                project_id,
+                milestone,
+                estimate_field,
+                prs_ready,
+            ),
             lambda: progress_mod.weighted_progress_for_milestone(
-                milestone, items, estimate_field, field_values
+                milestone,
+                items,
+                estimate_field,
+                field_values,
+                pr_by_issue=pr_by_issue,
+                live_prs=False,
             ),
         )
         if data is not None
@@ -96,16 +216,37 @@ def Page():
 
         if loading:
             solara.ProgressLinear(True)
-            solara.Text("Fetching issues and timelines…", style="color: var(--color-fg-muted);")
-            return
+            if data is None:
+                solara.Text("Fetching issues and timelines…", style="color: var(--color-fg-muted);")
+                return
+            solara.Text(
+                "Refreshing issues and timelines…",
+                style="color: var(--color-fg-muted); margin-bottom: 8px;",
+            )
+        elif data is not None and pr_by_issue is None:
+            solara.ProgressLinear(True)
+            solara.Text(
+                "Refresh in Progress…",
+                style="color: var(--color-fg-muted); margin-bottom: 8px;",
+            )
 
-        if error:
+        if error and data is None:
             solara.Text(f"Error: {error}", style="color: var(--color-critical, #d03b3b);")
             return
 
         if data is None:
             return
 
+        if error:
+            solara.Text(
+                error,
+                style="color: var(--color-critical, #d03b3b); margin-bottom: 8px;",
+            )
+        if warning:
+            solara.Text(
+                warning,
+                style="color: #9a6700; margin-bottom: 8px;",
+            )
         with solara.Row(gap="12px", style="align-items: flex-end; margin-bottom: 16px;"):
             MilestoneSelect(items)
             ActivityWindowSelect()
@@ -121,28 +262,86 @@ def Page():
                     "max-width: calc(55% - 12px); min-width: 420px;"
                 )
             ):
-                _ActivitySection(project_id, milestone, items, timelines, field_values, estimate_field)
-                solara.HTML(tag="div", style="margin: 24px 0;")
-                _BurnupSection(project_id, milestone, estimate_field, items, timelines, field_values)
+                _ActivitySection(
+                    project_id,
+                    milestone,
+                    items,
+                    timelines,
+                    field_values,
+                    estimate_field,
+                    progress_data,
+                )
 
             with solara.Column(
+                gap="12px",
                 style=(
                     "flex: 0 0 calc(45% - 12px); width: calc(45% - 12px); "
                     "max-width: calc(45% - 12px); min-width: 320px; align-self: stretch;"
-                )
+                ),
             ):
-                _MilestoneSummary(project_id, milestone, estimate_field, items, timelines, field_values, progress_data, contributors)
-                solara.HTML(tag="div", style="margin: 12px 0;")
-                solara.Text(
-                    "PROGRESS",
-                    style="font-size: 0.75rem; font-weight: 600; color: var(--color-fg-muted); "
-                          "letter-spacing: 0.06em; margin-bottom: 12px;",
+                with solara.Row(
+                    gap="12px",
+                    style="width: 100%; align-items: stretch; flex-wrap: wrap;",
+                ):
+                    with solara.Column(style=_HALF_CARD):
+                        with solara.Column(style=_CARD_STYLE):
+                            ProgressSummary(progress_data, estimate_field)
+                    with solara.Column(style=_HALF_CARD):
+                        _WorkdaysCard(project_id, milestone, items)
+
+                with solara.Row(
+                    gap="12px",
+                    style="width: 100%; align-items: stretch; flex-wrap: wrap;",
+                ):
+                    with solara.Column(style=_HALF_CARD):
+                        _RoadmapDeltaCard(
+                            project_id,
+                            milestone,
+                            start_field,
+                            end_field,
+                            items,
+                            field_values,
+                            pr_by_issue,
+                            prs_ready,
+                        )
+                    with solara.Column(style=_HALF_CARD):
+                        _EstimatedDaysCard(
+                            project_id,
+                            milestone,
+                            estimate_field,
+                            items,
+                            timelines,
+                            field_values,
+                            progress_data,
+                            contributors,
+                        )
+
+                solara.HTML(tag="div", style="height: 16px;")
+                _BurnupSection(
+                    project_id,
+                    milestone,
+                    estimate_field,
+                    items,
+                    timelines,
+                    field_values,
+                    state.overview_cache.get(
+                        ("review_awards", _OVERVIEW_CACHE_VERSION, project_id)
+                    ),
+                    state.overview_reviews_ready.value,
                 )
-                ProgressBreakdown(progress_data, estimate_field)
 
 
 @solara.component
-def _BurnupSection(project_id, milestone, estimate_field, items, timelines, field_values):
+def _BurnupSection(
+    project_id,
+    milestone,
+    estimate_field,
+    items,
+    timelines,
+    field_values,
+    review_awards,
+    reviews_ready,
+):
     dates = _cached(
         (_OVERVIEW_CACHE_VERSION, "burnup_dates", project_id),
         lambda: [
@@ -192,11 +391,61 @@ def _BurnupSection(project_id, milestone, estimate_field, items, timelines, fiel
         return
 
     milestone_label = "All milestones" if milestone == "all" else milestone
-    BurnupChart(rows, title=f"Burn-up — {milestone_label}", estimate_field=estimate_field, height=620)
+    with solara.Column(gap="0px", style=_CARD_STYLE):
+        solara.Text(
+            f"Burn-up — {milestone_label}",
+            style=(
+                "font-size: 0.88rem; font-weight: 600; color: var(--color-fg-default); "
+                "margin-bottom: 12px;"
+            ),
+        )
+        BurnupChart(rows, height=420)
+        solara.HTML(tag="div", style="height: 6px;")
+        _ReviewAwards(review_awards, reviews_ready)
 
 
 @solara.component
-def _ActivitySection(project_id, milestone, items, timelines, field_values, estimate_field):
+def _ReviewAwards(review_awards: list[dict[str, Any]] | None, reviews_ready: int):
+    """Leaderboard of formal PR reviewers for this project."""
+    del reviews_ready  # dependency for re-render when background fetch completes
+    with solara.Column(gap="4px", style="margin-top: 0; width: 100%;"):
+        solara.Text(
+            "Project reviews awards",
+            style=(
+                "font-size: 0.78rem; font-weight: 600; color: var(--color-fg-muted);"
+            ),
+        )
+        if review_awards is None:
+            solara.Text(
+                "Loading…",
+                style="font-size: 0.78rem; color: var(--color-fg-muted); font-style: italic;",
+            )
+            return
+        if not review_awards:
+            solara.Text(
+                "No reviews yet.",
+                style="font-size: 0.78rem; color: var(--color-fg-muted); font-style: italic;",
+            )
+            return
+        for i in range(0, len(review_awards), 3):
+            with solara.Row(
+                gap="12px",
+                style="width: 100%; align-items: baseline;",
+            ):
+                for row in review_awards[i : i + 3]:
+                    cup = " 🏆" if row.get("leader") else ""
+                    with solara.Column(style="flex: 1 1 0; min-width: 0;"):
+                        solara.Text(
+                            f"{row['name']} · {row['count']}{cup}",
+                            style="font-size: 0.78rem; color: var(--color-fg-default);",
+                        )
+                # Keep columns aligned when the last row has fewer than 3 people.
+                for _ in range(3 - len(review_awards[i : i + 3])):
+                    solara.HTML(tag="div", style="flex: 1 1 0; min-width: 0;")
+
+
+@solara.component
+def _ActivitySection(project_id, milestone, items, timelines, field_values, estimate_field, progress_data):
     days = state.activity_window_days.value
     since = activity_mod.since_date(days)
 
@@ -207,6 +456,10 @@ def _ActivitySection(project_id, milestone, items, timelines, field_values, esti
     completed = _cached(
         (_OVERVIEW_CACHE_VERSION, "activity_completed", project_id, milestone, since),
         lambda: activity_mod.completed_in_window(milestone, since, items, timelines),
+    )
+    in_progress = _cached(
+        (_OVERVIEW_CACHE_VERSION, "activity_in_progress", project_id, milestone),
+        lambda: activity_mod.currently_in_progress(milestone, items, timelines),
     )
     added_estimate = _cached(
         (_OVERVIEW_CACHE_VERSION, "activity_added_estimate", project_id, milestone, since, estimate_field),
@@ -240,11 +493,31 @@ def _ActivitySection(project_id, milestone, items, timelines, field_values, esti
         )
         if completed:
             for issue in completed[:10]:
-                _IssueRow(issue, estimate_field=estimate_field, field_values=field_values)
+                _IssueRow(
+                    issue,
+                    estimate_field=estimate_field,
+                    field_values=field_values,
+                    show_assignee=True,
+                )
             if len(completed) > 10:
                 solara.Text(f"…and {len(completed) - 10} more", style="color: var(--color-fg-muted); font-size: 0.82rem;")
         else:
             solara.Text("None in this window.", style="color: var(--color-fg-muted); font-size: 0.85rem;")
+
+        solara.HTML(tag="div", style="margin: 12px 0;")
+
+        solara.Text(
+            f"In Progress ({len(in_progress)})",
+            style="font-weight: 600; margin-bottom: 4px;",
+        )
+        if in_progress:
+            for issue in in_progress:
+                _InProgressRow(issue)
+        else:
+            solara.Text("None.", style="color: var(--color-fg-muted); font-size: 0.85rem;")
+
+        solara.HTML(tag="div", style="margin: 16px 0 8px 0;")
+        ProgressByParent(progress_data, estimate_field)
 
 
 @solara.component
@@ -252,11 +525,13 @@ def _IssueRow(
     issue: dict[str, Any],
     estimate_field: str = "",
     field_values: dict[str, Any] | None = None,
+    show_assignee: bool = False,
 ):
     url = issue.get("url", "")
     number = issue.get("number", "")
     title = issue.get("title", "")
     at = (issue.get("at") or "")[:10]
+    assignee_label = people.format_assignees(issue.get("assignees") or [])
     show_estimate = bool(estimate_field and field_values is not None)
     estimate_label = ""
     if show_estimate:
@@ -291,105 +566,219 @@ def _IssueRow(
         solara.Text(
             title,
             style=(
-                "font-size: 0.85rem; flex: 0 1 70%; min-width: 0; "
+                "font-size: 0.85rem; flex: 1 1 auto; min-width: 0; "
                 "white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
             ),
         )
+        if show_assignee:
+            solara.Text(assignee_label, style=f"{meta_style} width: 120px;")
         solara.Text(at, style=f"{meta_style} width: 88px;")
         if show_estimate:
             solara.Text(estimate_label, style=f"{meta_style} width: 72px;")
 
 
 @solara.component
-def _MilestoneSummary(project_id, milestone, estimate_field, items, timelines, field_values, progress_data, contributors):
-    milestone_meta = (
-        _cached(
+def _InProgressRow(issue: dict[str, Any]):
+    url = issue.get("url", "")
+    number = issue.get("number", "")
+    title = issue.get("title", "")
+    assignee_label = people.format_assignees(issue.get("assignees") or [])
+    since = (issue.get("at") or "")[:10]
+    since_label = f"since {since}" if since else "since —"
+    number_label = f"#{number}" if number is not None and number != "" else "Item"
+    meta_style = (
+        "font-size: 0.78rem; color: var(--color-fg-muted); "
+        "white-space: nowrap; text-align: left;"
+    )
+
+    with solara.Row(
+        gap="8px",
+        style="align-items: center; padding: 3px 0; border-bottom: 1px solid var(--color-border);",
+    ):
+        if url:
+            solara.HTML(
+                tag="a",
+                unsafe_innerHTML=number_label,
+                attributes={
+                    "href": url,
+                    "target": "_blank",
+                    "style": "color: #0969da; text-decoration: none;",
+                },
+            )
+        else:
+            solara.Text(number_label, style="font-size: 0.85rem; color: var(--color-fg-muted);")
+        solara.Text(
+            title,
+            style=(
+                "font-size: 0.85rem; flex: 1 1 auto; min-width: 0; "
+                "white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
+            ),
+        )
+        solara.Text(assignee_label, style=f"{meta_style} width: 120px;")
+        solara.Text(since_label, style=f"{meta_style} width: 110px;")
+
+
+@solara.component
+def _RoadmapDeltaCard(
+    project_id,
+    milestone,
+    start_field,
+    end_field,
+    items,
+    field_values,
+    pr_by_issue,
+    prs_ready,
+):
+    roadmap_delta = None
+    if milestone not in (None, "all"):
+        roadmap_delta = _cached(
+            (
+                _OVERVIEW_CACHE_VERSION,
+                "roadmap_delta",
+                project_id,
+                milestone,
+                start_field,
+                end_field,
+                utc_today().isoformat(),
+                prs_ready,
+            ),
+            lambda: roadmap_mod.roadmap_delta_days(
+                milestone,
+                items,
+                field_values,
+                start_field,
+                end_field,
+                utc_today(),
+                pr_by_issue=pr_by_issue,
+                live_prs=False,
+            ),
+        )
+    roadmap_delta_label = _format_signed_days(roadmap_delta)
+    roadmap_delta_color = _roadmap_delta_color(roadmap_delta)
+
+    with solara.Column(gap="4px", style=_CARD_STYLE):
+        solara.Text(
+            "Roadmap delta (days)",
+            style="font-size: 0.78rem; font-weight: 600; color: var(--color-fg-muted);",
+        )
+        solara.Markdown(
+            "_Compares #workdays owed (all issues with end before today) with "
+            "#workdays earned (completed spans + progress on open overdue)_",
+            style="font-size: 0.72rem; color: var(--color-fg-muted); margin: 0 0 2px 0; line-height: 1.35;",
+        )
+        solara.Text(
+            roadmap_delta_label,
+            style=f"font-size: 1.5rem; font-weight: 600; color: {roadmap_delta_color};",
+        )
+        if milestone in (None, "all"):
+            solara.Text(
+                "Select a milestone",
+                style="font-size: 0.78rem; color: var(--color-fg-muted);",
+            )
+
+
+@solara.component
+def _WorkdaysCard(project_id, milestone, items):
+    workdays_left = None
+    due_on = None
+    if milestone not in (None, "all"):
+        milestone_meta = _cached(
             (_OVERVIEW_CACHE_VERSION, "milestone_meta", project_id, milestone),
             lambda: _milestone_metadata(milestone, items),
         )
-        if milestone not in (None, "all")
-        else None
-    )
-    open_estimated_days = (
-        _cached(
-            (_OVERVIEW_CACHE_VERSION, "open_estimated_days", project_id, milestone, estimate_field),
-            lambda: _open_estimated_days(milestone, estimate_field, items, timelines, field_values),
+        if milestone_meta is not None:
+            due_on = milestone_meta.get("dueOn")
+            workdays_left = _workdays_until(due_on[:10] if due_on else None)
+
+    with solara.Column(style=_CARD_STYLE):
+        solara.Text(
+            "Workdays to target",
+            style="font-size: 0.78rem; font-weight: 600; color: var(--color-fg-muted);",
         )
-        if milestone not in (None, "all")
-        else 0.0
+        solara.Text(
+            "—" if workdays_left is None else str(workdays_left),
+            style="font-size: 1.5rem; font-weight: 600;",
+        )
+        if due_on:
+            solara.HTML(
+                tag="div",
+                unsafe_innerHTML=(
+                    "<span style='color: var(--color-fg-muted);'>Due </span>"
+                    f"<span style='font-weight: 600;'>{due_on[:10]}</span>"
+                ),
+                style="font-size: 0.78rem;",
+            )
+        else:
+            solara.Text(
+                "Select a milestone",
+                style="font-size: 0.78rem; color: var(--color-fg-muted);",
+            )
+
+
+@solara.component
+def _EstimatedDaysCard(
+    project_id,
+    milestone,
+    estimate_field,
+    items,
+    timelines,
+    field_values,
+    progress_data,
+    contributors,
+):
+    if milestone in (None, "all"):
+        with solara.Column(style=_CARD_STYLE):
+            solara.Text(
+                "Estimated task days left",
+                style="font-size: 0.78rem; font-weight: 600; color: var(--color-fg-muted);",
+            )
+            solara.Text("—", style="font-size: 1.5rem; font-weight: 600;")
+            solara.Text(
+                "Select a milestone",
+                style="font-size: 0.78rem; color: var(--color-fg-muted);",
+            )
+        return
+
+    open_estimated_days = _cached(
+        (_OVERVIEW_CACHE_VERSION, "open_estimated_days", project_id, milestone, estimate_field),
+        lambda: _open_estimated_days(milestone, estimate_field, items, timelines, field_values),
+    )
+    estimated_days_left = max(
+        0.0, progress_data.get("total_estimate", 0.0) - progress_data.get("done", 0.0)
+    )
+    contributors_count = int(contributors) if contributors else 0
+    fifty_precent_rule_days = estimated_days_left * 2
+    days_per_participant = (
+        fifty_precent_rule_days / contributors_count if contributors_count else 0.0
     )
 
-    if milestone in (None, "all"):
-        return
-    if milestone_meta is None:
-        return
-
-    due_on = milestone_meta.get("dueOn")
+    milestone_meta = _cached(
+        (_OVERVIEW_CACHE_VERSION, "milestone_meta", project_id, milestone),
+        lambda: _milestone_metadata(milestone, items),
+    )
+    due_on = (milestone_meta or {}).get("dueOn")
     workdays_left = _workdays_until(due_on[:10] if due_on else None)
-    estimated_days_left = max(0.0, progress_data.get("total_estimate", 0.0) - progress_data.get("done", 0.0))
-    contributors_count = int(contributors)
-    fifty_precent_rule_days = estimated_days_left * 2
-    days_per_participant = fifty_precent_rule_days / contributors_count if contributors_count else 0.0
     days_per_participant_color = _days_per_participant_color(days_per_participant, workdays_left)
 
-    with solara.Column(gap="12px", style="width: 100%;"):
-        with solara.Row(gap="12px", style="width: 100%; align-items: stretch; flex-wrap: wrap;"):
-            with solara.Column(
-                style=(
-                    "flex: 1 1 220px; padding: 12px 14px; border: 1px solid var(--color-border); "
-                    "border-radius: 8px; background: var(--color-canvas-subtle);"
-                ),
-            ):
-                solara.Text(
-                    "Workdays to target",
-                    style="font-size: 0.78rem; font-weight: 600; color: var(--color-fg-muted);",
-                )
-                solara.Text(
-                    "—" if workdays_left is None else str(workdays_left),
-                    style="font-size: 1.5rem; font-weight: 600;",
-                )
-                if due_on:
-                    solara.HTML(
-                        tag="div",
-                        unsafe_innerHTML=(
-                            "<span style='color: var(--color-fg-muted);'>Due </span>"
-                            f"<span style='font-weight: 600;'>{due_on[:10]}</span>"
-                        ),
-                        style="font-size: 0.82rem;",
-                    )
-
-            with solara.Column(
-                style=(
-                    "flex: 1 1 220px; padding: 12px 14px; border: 1px solid var(--color-border); "
-                    "border-radius: 8px; background: var(--color-canvas-subtle);"
-                ),
-            ):
-                solara.Text(
-                    "Estimated task days left",
-                    style="font-size: 0.78rem; font-weight: 600; color: var(--color-fg-muted);",
-                )
-                solara.Text(f"{estimated_days_left:.1f}", style="font-size: 1.5rem; font-weight: 600;")
-                solara.Text(
-                    f"{open_estimated_days:.1f} open estimate days",
-                    style="font-size: 0.82rem; color: var(--color-fg-muted);",
-                )
-                solara.Text(
-                    f"{estimated_days_left:.1f} estimate days left (with progress derived from issue state)",
-                    style="font-size: 0.82rem; color: var(--color-fg-muted);",
-                )
-                solara.Text(
-                    f"{fifty_precent_rule_days:.1f} estimate days with the 50% rule",
-                    style="font-size: 0.82rem; color: var(--color-fg-muted);",
-                )
-                solara.HTML(
-                    tag="div",
-                    unsafe_innerHTML=(
-                        f"<span style='color: {days_per_participant_color}; font-weight: 600;'>"
-                        f"{days_per_participant:.1f}</span> "
-                        f"<span style='color: var(--color-fg-muted);'>estimate days per contributor</span>"
-                    ),
-                    style="font-size: 0.82rem;",
-                )
+    with solara.Column(style=_CARD_STYLE):
+        solara.Text(
+            "Estimated task days left",
+            style="font-size: 0.78rem; font-weight: 600; color: var(--color-fg-muted);",
+        )
+        solara.Text(f"{estimated_days_left:.1f}", style="font-size: 1.5rem; font-weight: 600;")
+        solara.Text(
+            f"{open_estimated_days:.1f} open · {fifty_precent_rule_days:.1f} with 50% rule",
+            style="font-size: 0.78rem; color: var(--color-fg-muted);",
+        )
+        solara.HTML(
+            tag="div",
+            unsafe_innerHTML=(
+                f"<span style='color: {days_per_participant_color}; font-weight: 600;'>"
+                f"{days_per_participant:.1f}</span> "
+                f"<span style='color: var(--color-fg-muted);'>per contributor</span>"
+            ),
+            style="font-size: 0.78rem;",
+        )
 
 
 def _milestone_metadata(milestone: str, items: dict[str, Any]) -> dict[str, Any] | None:
@@ -471,23 +860,52 @@ def _days_per_participant_color(days_per_participant: float, workdays_left: int 
     return "#d03b3b"
 
 
+def _format_signed_days(value: int | None) -> str:
+    if value is None:
+        return "—"
+    if value > 0:
+        return f"+{value}"
+    return str(value)
+
+
+def _roadmap_delta_color(value: int | None) -> str:
+    if value is None:
+        return "var(--color-fg-default)"
+    if value >= 0:
+        return "#0ca30c"  # green — on track / ahead
+    if value >= -5:
+        return "#fab219"  # orange — mild delay
+    return "#d03b3b"  # red — more than 5 days behind
+
+
 # ---------------------------------------------------------------------------
 # Actions
 # ---------------------------------------------------------------------------
 
 def _refresh(project_id, org, number):
-    state.project_data.value = None
+    # Keep showing the current data while refresh runs.
     state.loading.value = True
     state.error.value = None
-    state.clear_overview_cache()
+    state.warning.value = None
 
     def run():
         try:
+            from core import github as gh
             from core import timeline as tl
-            result = tl.load(project_id, org, number, force=True)
+
+            # Hard refresh (force=True) refetches every timeline and will blow
+            # through the quota. Use incremental refresh; skip entirely if
+            # nearly exhausted so the UI keeps working from cache.
+            if not gh.has_budget(50):
+                state.warning.value = _RATE_LIMIT_CACHE_WARNING
+                return
+
+            result = tl.load(project_id, org, number, force=False)
+            state.clear_overview_cache()
             state.project_data.value = result
-        except Exception as e:
-            state.error.value = str(e)
+            state.warning.value = None
+        except Exception:
+            state.warning.value = _RATE_LIMIT_CACHE_WARNING
         finally:
             state.loading.value = False
 
