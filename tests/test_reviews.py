@@ -3,7 +3,7 @@
 from core.reviews import build_awards, rank_reviewers
 
 
-def test_rank_reviewers_counts_distinct_prs_and_marks_leader():
+def test_rank_reviewers_counts_distinct_prs():
     pr_reviews = {
         "PR_1": {
             "author": "alice",
@@ -31,10 +31,10 @@ def test_rank_reviewers_counts_distinct_prs_and_marks_leader():
     assert [r["login"] for r in ranked] == ["bob", "carol"]
     assert ranked[0]["count"] == 2
     assert ranked[0]["pr_numbers"] == [1, 2]
-    assert ranked[0]["leader"] is True
+    assert "leader" not in ranked[0]
     assert ranked[1]["count"] == 2
     assert ranked[1]["pr_numbers"] == [1, 3]
-    assert ranked[1]["leader"] is True
+    assert "leader" not in ranked[1]
 
 
 def test_build_awards_writes_by_person_with_pr_numbers():
@@ -55,12 +55,14 @@ def test_build_awards_writes_by_person_with_pr_numbers():
         },
     }
     payload = build_awards(pr_reviews)
-    assert payload["version"] == 4
+    assert payload["version"] == 5
     person = payload["by_person"]["inespot"]
     assert person["name"] == "Ines"
     assert person["count"] == 2
     assert person["pr_numbers"] == [10, 20]
     assert person["prs"][0]["title"] == "Ten"
+    assert "leader" not in person
+    assert "leader" not in payload["awards"][0]
 
 
 def test_rank_reviewers_excludes_author_self_review_and_bots():
@@ -77,7 +79,7 @@ def test_rank_reviewers_excludes_author_self_review_and_bots():
     assert len(ranked) == 1
     assert ranked[0]["login"] == "bob"
     assert ranked[0]["count"] == 1
-    assert ranked[0]["leader"] is True
+    assert "leader" not in ranked[0]
 
 
 def test_rank_reviewers_empty():

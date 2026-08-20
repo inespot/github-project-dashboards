@@ -23,7 +23,7 @@ _EMPTY_PROGRESS = {
     "by_parent": [],
 }
 
-_OVERVIEW_CACHE_VERSION = "utc_v18_awards_disk_status_sync"
+_OVERVIEW_CACHE_VERSION = "utc_v19_awards_disk_render"
 
 _CARD_STYLE = (
     "padding: 12px 14px; border: 1px solid var(--color-border); "
@@ -36,6 +36,24 @@ _HALF_CARD = "flex: 1 1 calc(50% - 6px); min-width: 140px;"
 
 def _cached(key: tuple[object, ...], factory):
     return state.overview_cache_get_or_set(key, factory)
+
+
+def _review_awards_cache_key(project_id: str) -> tuple[object, ...]:
+    return ("review_awards", _OVERVIEW_CACHE_VERSION, project_id)
+
+
+def _resolve_review_awards(project_id: str) -> list[dict[str, Any]] | None:
+    """Memory cache, then disk — so UI never sticks on Loading when reviews.json exists."""
+    if not project_id:
+        return None
+    cache_key = _review_awards_cache_key(project_id)
+    if cache_key in state.overview_cache:
+        return state.overview_cache[cache_key]
+    local = reviews_mod.read_local_awards(project_id)
+    if local is not None:
+        state.overview_cache[cache_key] = local
+        return local
+    return None
 
 
 _RATE_LIMIT_CACHE_WARNING = (
@@ -143,7 +161,7 @@ def Page():
     def prefetch_review_awards():
         if data is None or not project_id:
             return
-        cache_key = ("review_awards", _OVERVIEW_CACHE_VERSION, project_id)
+        cache_key = _review_awards_cache_key(project_id)
         if cache_key in state.overview_cache:
             return
 
@@ -158,16 +176,23 @@ def Page():
             from core import github as gh
 
             try:
-                if not gh.has_budget(100):
+                # Disk may have been written while we waited (e.g. offline recompute).
+                local = reviews_mod.read_local_awards(project_id)
+                if local is not None:
+                    state.overview_cache[cache_key] = local
+                elif not gh.has_budget(100):
                     state.overview_cache[cache_key] = []
                     state.warning.value = _RATE_LIMIT_CACHE_WARNING
                 else:
                     awards = reviews_mod.review_awards(items, project_id=project_id)
                     state.overview_cache[cache_key] = awards
             except Exception:
-                if cache_key not in state.overview_cache:
+                local = reviews_mod.read_local_awards(project_id)
+                if local is not None:
+                    state.overview_cache[cache_key] = local
+                elif cache_key not in state.overview_cache:
                     state.overview_cache[cache_key] = []
-                state.warning.value = _RATE_LIMIT_CACHE_WARNING
+                    state.warning.value = _RATE_LIMIT_CACHE_WARNING
             state.overview_reviews_ready.value = state.overview_reviews_ready.value + 1
 
         threading.Thread(target=run, daemon=True).start()
@@ -324,9 +349,7 @@ def Page():
                     items,
                     timelines,
                     field_values,
-                    state.overview_cache.get(
-                        ("review_awards", _OVERVIEW_CACHE_VERSION, project_id)
-                    ),
+                    _resolve_review_awards(project_id),
                     state.overview_reviews_ready.value,
                 )
 
@@ -410,11 +433,12 @@ def _ReviewAwards(review_awards: list[dict[str, Any]] | None, reviews_ready: int
     del reviews_ready  # dependency for re-render when background fetch completes
     with solara.Column(gap="4px", style="margin-top: 0; width: 100%;"):
         solara.Text(
-            "Project reviews awards",
+            "Project reviews awards 🏆",
             style=(
                 "font-size: 0.78rem; font-weight: 600; color: var(--color-fg-muted);"
             ),
         )
+        solara.HTML(tag="div", style="height: 6px;")
         if review_awards is None:
             solara.Text(
                 "Loading…",
@@ -433,10 +457,9 @@ def _ReviewAwards(review_awards: list[dict[str, Any]] | None, reviews_ready: int
                 style="width: 100%; align-items: baseline;",
             ):
                 for row in review_awards[i : i + 3]:
-                    cup = " 🏆" if row.get("leader") else ""
                     with solara.Column(style="flex: 1 1 0; min-width: 0;"):
                         solara.Text(
-                            f"{row['name']} · {row['count']}{cup}",
+                            f"{row['name']} · {row['count']}",
                             style="font-size: 0.78rem; color: var(--color-fg-default);",
                         )
                 # Keep columns aligned when the last row has fewer than 3 people.
@@ -662,8 +685,8 @@ def _RoadmapDeltaCard(
             style="font-size: 0.78rem; font-weight: 600; color: var(--color-fg-muted);",
         )
         solara.Markdown(
-            "_Compares #workdays owed (all issues with end before today) with "
-            "#workdays earned (completed spans + progress on open overdue)_",
+            "_Compares #workdays owed (issues with end < today) with "
+            "#workdays earned (completed + progress on open overdue issues)_",
             style="font-size: 0.72rem; color: var(--color-fg-muted); margin: 0 0 2px 0; line-height: 1.35;",
         )
         solara.Text(

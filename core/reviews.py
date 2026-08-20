@@ -81,11 +81,11 @@ _FETCH_WORKERS = 2
 _COUNTABLE_STATES = frozenset({"APPROVED", "CHANGES_REQUESTED", "COMMENTED"})
 
 _CACHE_NAME = "reviews"
-_CACHE_VERSION = 4  # reviews.json with pr_numbers per person
+_CACHE_VERSION = 5  # awards / by_person without leader flag
 
 
 def read_local_awards(project_id: str) -> list[dict[str, Any]] | None:
-    """Return disk-cached award rows (login/name/count/leader) if compatible."""
+    """Return disk-cached award rows (login/name/count/pr_numbers) if compatible."""
     cached = read_local_reviews(project_id)
     if cached is None:
         return None
@@ -120,9 +120,13 @@ def review_awards(
 
     When ``project_id`` is set, a successful complete fetch writes ``reviews.json``
     with per-person counts and PR numbers. Partial fetches keep the previous
-    disk cache instead of under-counting.
+    disk cache instead of under-counting. Unless ``force`` is true, an existing
+    compatible ``reviews.json`` is returned without hitting the network.
     """
-    del force  # disk bypass is handled by the Overview prefetch path
+    if project_id and not force:
+        local = read_local_awards(project_id)
+        if local is not None:
+            return local
 
     issue_ids = [
         iid
@@ -197,11 +201,6 @@ def build_awards(pr_reviews: dict[str, dict[str, Any]]) -> dict[str, Any]:
         )
 
     awards.sort(key=lambda row: (-row["count"], row["name"].lower()))
-    if awards:
-        top = awards[0]["count"]
-        for row in awards:
-            row["leader"] = row["count"] == top
-            by_person[row["login"]]["leader"] = row["leader"]
 
     return {
         "version": _CACHE_VERSION,
