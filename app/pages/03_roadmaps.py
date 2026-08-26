@@ -687,6 +687,7 @@ def _do_take_snapshot(project_id: str, live_data: dict | None, set_taken) -> Non
             "url": item.get("url"),
             "state": item.get("state"),
             "stateReason": item.get("stateReason"),
+            "assignees": list(item.get("assignees") or []),
             "fields": {
                 fname: {"value": entry["value"], "updatedAt": entry.get("updatedAt", "")}
                 for fname, entry in fv.items()
@@ -726,7 +727,7 @@ def _snapshot_to_items_and_fields(
             "stateReason": entry.get("stateReason"),
             "milestone": milestone,
             "project_status": project_status,
-            "assignees": [],
+            "assignees": list(entry.get("assignees") or []),
             "parent": None,
         }
         field_values[issue_id] = fields

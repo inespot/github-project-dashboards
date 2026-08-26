@@ -1,6 +1,12 @@
 """Tests for core.people display-name helpers."""
 
-from core.people import display_name, format_assignees
+from core.people import (
+    assignees_edit_value,
+    display_name,
+    format_assignees,
+    parse_assignee_input,
+    resolve_person_token,
+)
 
 
 def test_known_logins_map_to_display_names():
@@ -24,3 +30,19 @@ def test_format_assignees():
     assert format_assignees(["inespot", "samxbr"]) == "Ines, Sam"
     assert format_assignees([]) == "—"
     assert format_assignees(None) == "—"
+
+
+def test_parse_assignee_input_accepts_names_and_logins():
+    assert parse_assignee_input("Ines, samxbr") == ["inespot", "samxbr"]
+    assert parse_assignee_input("Sasha") == ["lkts"]
+    assert parse_assignee_input("") == []
+    assert parse_assignee_input("  Anton ; Pete ") == [
+        "burqen",
+        "PeteGillinElastic",
+    ]
+
+
+def test_resolve_and_edit_value_roundtrip():
+    assert resolve_person_token("David") == "DaveCTurner"
+    assert assignees_edit_value(["inespot", "lkts"]) == "Ines, Sasha"
+    assert assignees_edit_value([]) == ""

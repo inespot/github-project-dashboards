@@ -9,7 +9,8 @@ import solara
 from app import state
 from app.components.empty_state import NoProjectSelected
 from core import diff as core_diff
-from core import store
+from core import people, store
+from core.diff import ASSIGNEES_FIELD
 
 
 # ---------------------------------------------------------------------------
@@ -30,7 +31,11 @@ def _snap_to_items_and_fields(snap: dict) -> tuple[dict, dict]:
             "stateReason": entry.get("stateReason"),
             "milestone": _milestone_from_fields(fields),
             "project_status": _status_from_fields(fields),
-            "assignees": [],
+            "assignees": (
+                list(entry.get("assignees") or [])
+                if "assignees" in entry
+                else None
+            ),
             "parent": None,
         }
         field_values[issue_id] = fields
@@ -62,6 +67,7 @@ def _live_to_snap_items(live_data: dict) -> dict[str, Any]:
             "url": item.get("url"),
             "state": item.get("state"),
             "stateReason": item.get("stateReason"),
+            "assignees": list(item.get("assignees") or []),
             "fields": {
                 fname: {
                     "value": entry["value"],
@@ -228,7 +234,14 @@ def _ProposalCard(label: str, prop: dict, selected: bool, on_select, on_delete):
 # ---------------------------------------------------------------------------
 
 @solara.component
-def _DiffView(project_id: str, proposal_data: dict, live_data):
+def _DiffView(
+    project_id: str,
+    proposal_data: dict,
+    live_data,
+    start_field: str,
+    end_field: str,
+    estimate_field: str,
+):
     base = proposal_data.get("base", "current")
     p_items, p_fields = _snap_to_items_and_fields(proposal_data)
     base_result = _load_base(project_id, base, live_data)
@@ -243,18 +256,25 @@ def _DiffView(project_id: str, proposal_data: dict, live_data):
         return
 
     b_items, b_fields = base_result
-    changes = core_diff.compute(p_items, p_fields, b_items, b_fields)
+    columns = [
+        f for f in [start_field, end_field, estimate_field, ASSIGNEES_FIELD] if f
+    ]
+    rows = core_diff.issue_rows(p_items, p_fields, b_items, b_fields, columns)
 
-    if not changes:
+    if not rows:
         solara.Text(
             "No differences — this proposal matches the base.",
             style="color: var(--color-fg-muted); font-style: italic; padding: 8px 0;",
         )
         return
 
-    n = len(changes)
+    n = len(rows)
+    field_change_count = sum(
+        sum(1 for c in row.cells.values() if c.changed) for row in rows
+    )
     solara.Text(
-        f"{n} change{'s' if n != 1 else ''}",
+        f"{n} issue{'s' if n != 1 else ''} · {field_change_count} field change"
+        f"{'s' if field_change_count != 1 else ''}",
         style="font-size: 0.85rem; color: var(--color-fg-muted); margin-bottom: 8px;",
     )
 
@@ -270,47 +290,78 @@ def _DiffView(project_id: str, proposal_data: dict, live_data):
         "border-bottom: 1px solid var(--color-border-default); "
         "font-size: 0.82rem; align-items: center;"
     )
+    _COL = "flex: 2; min-width: 110px;"
+    _DANGER = "var(--color-danger-fg, #d03b3b)"
+
+    def _esc(s: str) -> str:
+        return (
+            s.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+        )
+
+    column_labels = {
+        start_field: "Start Date",
+        end_field: "End Date",
+        estimate_field: "Estimate",
+        ASSIGNEES_FIELD: "Assignee",
+    }
 
     with solara.Column(gap="0px"):
         with solara.Row(style=_HDR):
-            solara.HTML(tag="div", unsafe_innerHTML="Issue", style="flex: 3; min-width: 0;")
-            solara.HTML(tag="div", unsafe_innerHTML="Field", style="flex: 1;")
-            solara.HTML(tag="div", unsafe_innerHTML="Before", style="flex: 1; text-align: right;")
-            solara.HTML(tag="div", unsafe_innerHTML="After", style="flex: 1; text-align: right;")
+            solara.HTML(
+                tag="div",
+                unsafe_innerHTML="Issue",
+                style="flex: 3; min-width: 0;",
+            )
+            for col in columns:
+                solara.HTML(
+                    tag="div",
+                    unsafe_innerHTML=_esc(column_labels.get(col, col)),
+                    style=_COL,
+                )
 
-        for i, ch in enumerate(changes):
-            bg = "var(--color-canvas-default)" if i % 2 == 0 else "var(--color-canvas-subtle)"
+        for i, row in enumerate(rows):
+            bg = (
+                "var(--color-canvas-default)"
+                if i % 2 == 0
+                else "var(--color-canvas-subtle)"
+            )
             br = "0 0 6px 6px" if i == n - 1 else "0"
+            title = row.title[:50] + ("…" if len(row.title) > 50 else "")
             with solara.Row(style=f"background: {bg}; border-radius: {br}; {_ROW}"):
                 solara.HTML(
                     tag="div",
                     unsafe_innerHTML=(
-                        f"<a href='{ch.url}' target='_blank' "
+                        f"<a href='{_esc(row.url)}' target='_blank' "
                         f"style='color:var(--color-accent-fg);text-decoration:none;'>"
-                        f"#{ch.number}</a>"
-                        f" {ch.title[:50]}{'…' if len(ch.title) > 50 else ''}"
+                        f"#{row.number}</a> {_esc(title)}"
                     ),
-                    style="flex: 3; overflow: hidden; white-space: nowrap; min-width: 0;",
-                )
-                solara.HTML(
-                    tag="div",
-                    unsafe_innerHTML=ch.field,
-                    style="flex: 1; color: var(--color-fg-muted);",
-                )
-                solara.HTML(
-                    tag="div",
-                    unsafe_innerHTML=(
-                        str(ch.base_value) if ch.base_value is not None else "—"
+                    style=(
+                        "flex: 3; min-width: 0; overflow: hidden; "
+                        "white-space: nowrap; text-overflow: ellipsis;"
                     ),
-                    style="flex: 1; color: var(--color-danger-fg, #d03b3b); text-align: right;",
                 )
-                solara.HTML(
-                    tag="div",
-                    unsafe_innerHTML=(
-                        str(ch.proposal_value) if ch.proposal_value is not None else "—"
-                    ),
-                    style="flex: 1; color: #1baf7a; text-align: right;",
-                )
+                for col in columns:
+                    cell = row.cells.get(col) or core_diff.CellDisplay("—", False)
+                    if cell.changed:
+                        inner = (
+                            f"{_esc(cell.before)}"
+                            f" → "
+                            f"<span style='color:{_DANGER};font-weight:600;'>"
+                            f"{_esc(cell.after)}</span>"
+                        )
+                    else:
+                        inner = (
+                            f"<span style='color:var(--color-fg-default);'>"
+                            f"{_esc(cell.text)}</span>"
+                        )
+                    solara.HTML(
+                        tag="div",
+                        unsafe_innerHTML=inner,
+                        style=_COL,
+                    )
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +384,9 @@ def _EditView(
     def get_val(issue_id: str, field: str) -> str:
         if issue_id in edits and field in edits[issue_id]:
             return str(edits[issue_id][field])
+        if field == ASSIGNEES_FIELD:
+            assignees = (p_items.get(issue_id) or {}).get("assignees")
+            return people.assignees_edit_value(assignees or [])
         fv = p_fields.get(issue_id, {})
         entry = fv.get(field, {})
         val = entry.get("value") if isinstance(entry, dict) else entry
@@ -351,6 +405,9 @@ def _EditView(
             item = dict(new_items[iid])
             fields = dict(item.get("fields", {}))
             for fname, val in field_edits.items():
+                if fname == ASSIGNEES_FIELD:
+                    item["assignees"] = people.parse_assignee_input(val)
+                    continue
                 old = fields.get(fname, {})
                 fields[fname] = {
                     **(old if isinstance(old, dict) else {}),
@@ -364,6 +421,7 @@ def _EditView(
         on_saved(new_data)
 
     edit_fields = [f for f in [start_field, end_field, estimate_field] if f]
+    edit_fields = [*edit_fields, ASSIGNEES_FIELD]
     sorted_items = sorted(p_items.items(), key=lambda kv: kv[1].get("number", 0))
     n = len(sorted_items)
     change_count = sum(len(v) for v in edits.values())
@@ -392,7 +450,8 @@ def _EditView(
                 )
 
         solara.Text(
-            "Edit field values. Press Tab or Enter to apply a change, then Save.",
+            "Edit field values (Assignees: comma-separated names or GitHub logins). "
+            "Press Tab or Enter to apply a change, then Save.",
             style="font-size: 0.8rem; color: var(--color-fg-muted); margin-bottom: 8px;",
         )
 
@@ -583,19 +642,21 @@ def Page():
                                 outlined=True,
                                 on_click=view_in_roadmap,
                             )
-                        if edit_fields := [
-                            f
-                            for f in [start_field, end_field, estimate_field]
-                            if f
-                        ]:
-                            solara.Button(
-                                "✏ Edit fields",
-                                outlined=True,
-                                on_click=lambda *_: set_editing(True),
-                            )
+                        solara.Button(
+                            "✏ Edit fields",
+                            outlined=True,
+                            on_click=lambda *_: set_editing(True),
+                        )
 
                     solara.Markdown("**Changes vs. base**")
-                    _DiffView(project_id, proposal_data, live_data)
+                    _DiffView(
+                        project_id,
+                        proposal_data,
+                        live_data,
+                        start_field,
+                        end_field,
+                        estimate_field,
+                    )
 
         # Edit view
         if selected_label and editing:
