@@ -12,6 +12,7 @@ DISPLAY_NAMES: dict[str, str] = {
     "surya-estc": "Surya",
     "ywangd": "Yang",
     "nicktindall": "Nick",
+    "lkts": "Sasha",
 }
 
 

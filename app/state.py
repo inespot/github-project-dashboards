@@ -28,6 +28,8 @@ warning: solara.Reactive[str | None] = solara.reactive(None)
 overview_prs_ready: solara.Reactive[int] = solara.reactive(0)
 # Bumps when background review-awards fetch finishes.
 overview_reviews_ready: solara.Reactive[int] = solara.reactive(0)
+# Bumps when background PRs-in-review fetch finishes.
+overview_prs_in_review_ready: solara.Reactive[int] = solara.reactive(0)
 
 # Overview filters
 selected_milestone: solara.Reactive[str] = solara.reactive("all")
@@ -49,6 +51,7 @@ def clear_overview_cache() -> None:
     overview_cache.clear()
     overview_prs_ready.value = 0
     overview_reviews_ready.value = 0
+    overview_prs_in_review_ready.value = 0
 
 
 def overview_cache_get_or_set(key: tuple[Hashable, ...], factory: Callable[[], Any]) -> Any:

@@ -1,6 +1,6 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "github-project-dashboards"
@@ -22,8 +22,8 @@ dev = [
     "pytest-asyncio>=0.23",
 ]
 
-[tool.hatch.build.targets.wheel]
-packages = ["core", "app"]
+[tool.setuptools.packages.find]
+include = ["core*", "app*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

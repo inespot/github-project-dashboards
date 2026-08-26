@@ -12,7 +12,7 @@ from app import state
 from app.components.charts import BurnupChart, ProgressByParent, ProgressSummary
 from app.components.empty_state import NoProjectSelected
 from app.components.selectors import MilestoneSelect, ActivityWindowSelect, ContributorsSelect
-from core import activity as activity_mod, people, progress as progress_mod, reconstruct, reviews as reviews_mod, roadmap as roadmap_mod, series as series_mod, store
+from core import activity as activity_mod, people, progress as progress_mod, prs_in_review as prs_in_review_mod, reconstruct, reviews as reviews_mod, roadmap as roadmap_mod, series as series_mod, store
 from core.time import utc_today
 
 
@@ -23,7 +23,7 @@ _EMPTY_PROGRESS = {
     "by_parent": [],
 }
 
-_OVERVIEW_CACHE_VERSION = "utc_v19_awards_disk_render"
+_OVERVIEW_CACHE_VERSION = "utc_v23_prs_author_col"
 
 _CARD_STYLE = (
     "padding: 12px 14px; border: 1px solid var(--color-border); "
@@ -40,6 +40,11 @@ def _cached(key: tuple[object, ...], factory):
 
 def _review_awards_cache_key(project_id: str) -> tuple[object, ...]:
     return ("review_awards", _OVERVIEW_CACHE_VERSION, project_id)
+
+
+def _review_awards_live_key(project_id: str) -> tuple[object, ...]:
+    """Set once a live awards refresh is in-flight or finished for this cache gen."""
+    return ("review_awards_live", _OVERVIEW_CACHE_VERSION, project_id)
 
 
 def _resolve_review_awards(project_id: str) -> list[dict[str, Any]] | None:
@@ -162,30 +167,41 @@ def Page():
         if data is None or not project_id:
             return
         cache_key = _review_awards_cache_key(project_id)
-        if cache_key in state.overview_cache:
+        live_key = _review_awards_live_key(project_id)
+
+        # Paint from disk immediately so awards aren't blank while we refresh.
+        if cache_key not in state.overview_cache:
+            local_awards = reviews_mod.read_local_awards(project_id)
+            if local_awards is not None:
+                state.overview_cache[cache_key] = local_awards
+                state.overview_reviews_ready.value = state.overview_reviews_ready.value + 1
+
+        # Wait until timeline load/refresh finishes so we don't double-fetch
+        # (startup local paint + post-load) and we use the latest items.
+        if state.loading.value:
+            return
+        if live_key in state.overview_cache:
             return
 
-        # Prefer disk cache — do not burn rate limit re-fetching awards every load.
-        local_awards = reviews_mod.read_local_awards(project_id)
-        if local_awards is not None:
-            state.overview_cache[cache_key] = local_awards
-            state.overview_reviews_ready.value = state.overview_reviews_ready.value + 1
-            return
+        # Claim the live slot before starting the thread (effect may re-enter).
+        state.overview_cache[live_key] = "pending"
 
         def run():
             from core import github as gh
 
             try:
-                # Disk may have been written while we waited (e.g. offline recompute).
-                local = reviews_mod.read_local_awards(project_id)
-                if local is not None:
-                    state.overview_cache[cache_key] = local
-                elif not gh.has_budget(100):
-                    state.overview_cache[cache_key] = []
+                if not gh.has_budget(100):
+                    # Keep disk/memory awards; skip network this round.
+                    if cache_key not in state.overview_cache:
+                        state.overview_cache[cache_key] = []
                     state.warning.value = _RATE_LIMIT_CACHE_WARNING
+                    state.overview_cache[live_key] = False
                 else:
-                    awards = reviews_mod.review_awards(items, project_id=project_id)
+                    awards = reviews_mod.review_awards(
+                        items, project_id=project_id, force=True
+                    )
                     state.overview_cache[cache_key] = awards
+                    state.overview_cache[live_key] = True
             except Exception:
                 local = reviews_mod.read_local_awards(project_id)
                 if local is not None:
@@ -193,13 +209,65 @@ def Page():
                 elif cache_key not in state.overview_cache:
                     state.overview_cache[cache_key] = []
                     state.warning.value = _RATE_LIMIT_CACHE_WARNING
+                state.overview_cache[live_key] = False
             state.overview_reviews_ready.value = state.overview_reviews_ready.value + 1
 
         threading.Thread(target=run, daemon=True).start()
 
     solara.use_effect(
         prefetch_review_awards,
-        [project_id, id(data) if data is not None else 0],
+        [project_id, id(data) if data is not None else 0, loading],
+    )  # noqa: SH101
+
+    def prefetch_prs_in_review():
+        if data is None or not project_id:
+            return
+        cache_key = (
+            "prs_in_review",
+            _OVERVIEW_CACHE_VERSION,
+            project_id,
+            milestone,
+        )
+        live_key = (
+            "prs_in_review_live",
+            _OVERVIEW_CACHE_VERSION,
+            project_id,
+            milestone,
+        )
+        if state.loading.value:
+            return
+        if live_key in state.overview_cache:
+            return
+
+        state.overview_cache[live_key] = "pending"
+
+        def run():
+            from core import github as gh
+
+            try:
+                if not gh.has_budget(80):
+                    state.overview_cache[cache_key] = []
+                    state.warning.value = _RATE_LIMIT_CACHE_WARNING
+                    state.overview_cache[live_key] = False
+                else:
+                    state.overview_cache[cache_key] = prs_in_review_mod.list_prs_in_review(
+                        items, milestone
+                    )
+                    state.overview_cache[live_key] = True
+            except Exception:
+                if cache_key not in state.overview_cache:
+                    state.overview_cache[cache_key] = []
+                state.warning.value = _RATE_LIMIT_CACHE_WARNING
+                state.overview_cache[live_key] = False
+            state.overview_prs_in_review_ready.value = (
+                state.overview_prs_in_review_ready.value + 1
+            )
+
+        threading.Thread(target=run, daemon=True).start()
+
+    solara.use_effect(
+        prefetch_prs_in_review,
+        [project_id, id(data) if data is not None else 0, loading, milestone],
     )  # noqa: SH101
 
     progress_data = (
@@ -295,6 +363,10 @@ def Page():
                     field_values,
                     estimate_field,
                     progress_data,
+                    state.overview_cache.get(
+                        ("prs_in_review", _OVERVIEW_CACHE_VERSION, project_id, milestone)
+                    ),
+                    state.overview_prs_in_review_ready.value,
                 )
 
             with solara.Column(
@@ -423,7 +495,7 @@ def _BurnupSection(
             ),
         )
         BurnupChart(rows, height=420)
-        solara.HTML(tag="div", style="height: 6px;")
+        solara.HTML(tag="div", style="height: 14px;")
         _ReviewAwards(review_awards, reviews_ready)
 
 
@@ -435,7 +507,7 @@ def _ReviewAwards(review_awards: list[dict[str, Any]] | None, reviews_ready: int
         solara.Text(
             "Project reviews awards 🏆",
             style=(
-                "font-size: 0.78rem; font-weight: 600; color: var(--color-fg-muted);"
+                "font-size: 0.85rem; font-weight: 600; color: var(--color-fg-muted);"
             ),
         )
         solara.HTML(tag="div", style="height: 6px;")
@@ -468,7 +540,18 @@ def _ReviewAwards(review_awards: list[dict[str, Any]] | None, reviews_ready: int
 
 
 @solara.component
-def _ActivitySection(project_id, milestone, items, timelines, field_values, estimate_field, progress_data):
+def _ActivitySection(
+    project_id,
+    milestone,
+    items,
+    timelines,
+    field_values,
+    estimate_field,
+    progress_data,
+    prs_in_review,
+    prs_in_review_ready,
+):
+    del prs_in_review_ready  # dependency for re-render when background fetch completes
     days = state.activity_window_days.value
     since = activity_mod.since_date(days)
 
@@ -511,7 +594,7 @@ def _ActivitySection(project_id, milestone, items, timelines, field_values, esti
         solara.HTML(tag="div", style="margin: 12px 0;")
 
         solara.Text(
-            f"Completed ({len(completed)}) 🎉",
+            f"Completed Tasks ({len(completed)}) 🎉",
             style="font-weight: 600; margin-bottom: 4px;",
         )
         if completed:
@@ -530,7 +613,7 @@ def _ActivitySection(project_id, milestone, items, timelines, field_values, esti
         solara.HTML(tag="div", style="margin: 12px 0;")
 
         solara.Text(
-            f"In Progress ({len(in_progress)})",
+            f"In Progress Tasks ({len(in_progress)})",
             style="font-weight: 600; margin-bottom: 4px;",
         )
         if in_progress:
@@ -539,8 +622,85 @@ def _ActivitySection(project_id, milestone, items, timelines, field_values, esti
         else:
             solara.Text("None.", style="color: var(--color-fg-muted); font-size: 0.85rem;")
 
+        solara.HTML(tag="div", style="margin: 12px 0;")
+
+        _PrsInReviewSection(prs_in_review)
+
         solara.HTML(tag="div", style="margin: 16px 0 8px 0;")
         ProgressByParent(progress_data, estimate_field)
+
+
+@solara.component
+def _PrsInReviewSection(prs_in_review: list[dict[str, Any]] | None):
+    count = len(prs_in_review) if prs_in_review else 0
+
+    def _esc(s: str) -> str:
+        return (
+            s.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+        )
+
+    title_html = (
+        f'<div style="font-weight:600;margin-bottom:4px;">'
+        f"PRs in Review ({count})</div>"
+    )
+
+    if prs_in_review is None:
+        body = (
+            '<div style="color:var(--color-fg-muted);font-size:0.85rem;'
+            'font-style:italic;">Loading…</div>'
+        )
+    elif not prs_in_review:
+        body = (
+            '<div style="color:var(--color-fg-muted);font-size:0.85rem;">None.</div>'
+        )
+    else:
+        rows_html: list[str] = []
+        for pr in prs_in_review:
+            url = pr.get("url", "") or "#"
+            number = pr.get("number", "")
+            title = pr.get("title", "")
+            author_label = pr.get("author_label") or "—"
+            reviewers_label = pr.get("reviewers_label") or "Needs reviewer"
+            pending_on = pr.get("pending_on") or "Pending on reviewer"
+            draft_suffix = " (draft)" if pr.get("is_draft") else ""
+            number_label = f"#{number}" if number is not None and number != "" else "PR"
+            title_label = f"{title}{draft_suffix}"
+            rows_html.append(
+                '<div style="display:flex;align-items:center;gap:8px;flex-wrap:nowrap;'
+                "padding:3px 0;border-bottom:1px solid var(--color-border);"
+                'width:100%;box-sizing:border-box;">'
+                f'<a href="{_esc(url)}" target="_blank" '
+                f'style="color:#0969da;text-decoration:none;flex:0 0 auto;">'
+                f"{_esc(number_label)}</a>"
+                f'<span style="font-size:0.85rem;flex:1 1 auto;min-width:0;'
+                f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
+                f"{_esc(title_label)}</span>"
+                f'<span style="font-size:0.78rem;color:var(--color-fg-muted);'
+                f"width:100px;flex:0 0 100px;white-space:nowrap;overflow:hidden;"
+                f'text-overflow:ellipsis;text-align:left;">'
+                f"{_esc(author_label)}</span>"
+                f'<span style="font-size:0.78rem;color:var(--color-fg-muted);'
+                f"width:150px;flex:0 0 150px;white-space:nowrap;overflow:hidden;"
+                f'text-overflow:ellipsis;text-align:left;">'
+                f"{_esc(reviewers_label)}</span>"
+                f'<span style="font-size:0.78rem;color:var(--color-fg-muted);'
+                f"width:110px;flex:0 0 110px;white-space:nowrap;overflow:hidden;"
+                f'text-overflow:ellipsis;text-align:left;">'
+                f"{_esc(pending_on)}</span>"
+                "</div>"
+            )
+        body = "".join(rows_html)
+
+    # Title + body in one widget so Solara doesn't insert gap between them
+    # (In Progress title/rows are adjacent Solara children with only 4px margin).
+    solara.HTML(
+        tag="div",
+        unsafe_innerHTML=title_html + body,
+        attributes={"style": "width:100%;min-height:0;"},
+    )
 
 
 @solara.component

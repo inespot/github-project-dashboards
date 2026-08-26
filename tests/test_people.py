@@ -13,6 +13,7 @@ def test_known_logins_map_to_display_names():
     assert display_name("surya-estc") == "Surya"
     assert display_name("ywangd") == "Yang"
     assert display_name("nicktindall") == "Nick"
+    assert display_name("lkts") == "Sasha"
 
 
 def test_unknown_login_passthrough():
