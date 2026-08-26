@@ -9,7 +9,7 @@ import solara
 from app import state
 from app.components.empty_state import NoProjectSelected
 from core import diff as core_diff
-from core import people, store
+from core import people, proposals as proposals_mod, store
 from core.diff import ASSIGNEES_FIELD
 
 
@@ -422,7 +422,16 @@ def _EditView(
 
     edit_fields = [f for f in [start_field, end_field, estimate_field] if f]
     edit_fields = [*edit_fields, ASSIGNEES_FIELD]
-    sorted_items = sorted(p_items.items(), key=lambda kv: kv[1].get("number", 0))
+    sorted_items = sorted(
+        (
+            (iid, item)
+            for iid, item in p_items.items()
+            if proposals_mod.include_in_proposal_edit(
+                item, p_fields.get(iid) or {}, end_field
+            )
+        ),
+        key=lambda kv: kv[1].get("number", 0),
+    )
     n = len(sorted_items)
     change_count = sum(len(v) for v in edits.values())
 
@@ -451,7 +460,8 @@ def _EditView(
 
         solara.Text(
             "Edit field values (Assignees: comma-separated names or GitHub logins). "
-            "Press Tab or Enter to apply a change, then Save.",
+            "Showing incomplete issues and completed issues with an end date of today "
+            "or later. Press Tab or Enter to apply a change, then Save.",
             style="font-size: 0.8rem; color: var(--color-fg-muted); margin-bottom: 8px;",
         )
 
