@@ -141,17 +141,37 @@ def classify_pr(pr: dict[str, Any]) -> dict[str, Any]:
 
 
 def pending_on(pr: dict[str, Any]) -> str:
-    """Who the PR is waiting on, or ready to merge."""
+    """Who the PR is waiting on, or ready to merge.
+
+    - Approved → ready to merge
+    - Changes requested → author
+    - Outstanding review request (including re-requests after comments) → reviewer
+    - Someone already reviewed and nobody is currently requested → author
+    - Otherwise → reviewer / needs reviewer
+    """
     decision = (pr.get("reviewDecision") or "").upper()
     if decision == "APPROVED":
         return "Ready to merge"
     if decision == "CHANGES_REQUESTED":
         return "Pending on author"
-    # Anyone other than the author has responded → ball is with the author
-    # (address comments / re-request review), even if other requests remain.
+    if _has_outstanding_review_requests(pr):
+        return "Pending on reviewer"
     if _non_author_submitted_reviews(pr):
         return "Pending on author"
     return "Pending on reviewer"
+
+
+def _has_outstanding_review_requests(pr: dict[str, Any]) -> bool:
+    for node in (pr.get("reviewRequests") or {}).get("nodes") or []:
+        if not node:
+            continue
+        reviewer = node.get("requestedReviewer") or {}
+        if reviewer.get("__typename") in ("User", "Team"):
+            return True
+        # Some payloads omit __typename but still carry login/name.
+        if reviewer.get("login") or reviewer.get("name"):
+            return True
+    return False
 
 
 def reviewer_names(pr: dict[str, Any]) -> list[str]:

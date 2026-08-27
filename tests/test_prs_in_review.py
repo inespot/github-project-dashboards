@@ -51,22 +51,12 @@ def test_ready_to_merge_when_approved():
     assert pending_on(_pr(reviewDecision="APPROVED")) == "Ready to merge"
 
 
-def test_pending_on_author_when_someone_responded():
-    # Outstanding request remains, but a reviewer already commented.
+def test_pending_on_author_when_someone_responded_and_no_open_requests():
     assert (
         pending_on(
             _pr(
                 reviewDecision="REVIEW_REQUIRED",
-                reviewRequests={
-                    "nodes": [
-                        {
-                            "requestedReviewer": {
-                                "__typename": "User",
-                                "login": "samxbr",
-                            }
-                        }
-                    ]
-                },
+                reviewRequests={"nodes": []},
                 reviews={
                     "nodes": [
                         {"state": "COMMENTED", "author": {"login": "inespot"}},
@@ -75,6 +65,34 @@ def test_pending_on_author_when_someone_responded():
             )
         )
         == "Pending on author"
+    )
+
+
+def test_pending_on_reviewer_when_rerequested_after_comments():
+    # David already commented, then was re-requested → waiting on reviewer.
+    assert (
+        pending_on(
+            _pr(
+                author={"login": "inespot"},
+                reviewDecision="REVIEW_REQUIRED",
+                reviewRequests={
+                    "nodes": [
+                        {
+                            "requestedReviewer": {
+                                "__typename": "User",
+                                "login": "DaveCTurner",
+                            }
+                        }
+                    ]
+                },
+                reviews={
+                    "nodes": [
+                        {"state": "COMMENTED", "author": {"login": "DaveCTurner"}},
+                    ]
+                },
+            )
+        )
+        == "Pending on reviewer"
     )
 
 
@@ -133,7 +151,8 @@ def test_reviewers_include_requests_and_respondents_exclude_author():
     row = classify_pr(pr)
     assert row["author_label"] == "Anton"
     assert row["reviewers_label"] == "Sam, Ines"
-    assert row["pending_on"] == "Pending on author"
+    # Sam still requested → waiting on reviewer, even though Ines already commented.
+    assert row["pending_on"] == "Pending on reviewer"
 
 
 def test_approved_reviewers_exclude_author_comments():
