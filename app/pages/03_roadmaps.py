@@ -313,7 +313,7 @@ def _RoadmapTimeline(
             x=trace["x"],
             y=trace["y"],
             mode="lines",
-            line=dict(color=trace["line_color"], width=16),
+            line=dict(color=trace["line_color"], width=30),
             customdata=trace["customdata"],
             hovertemplate=(
                 "<b>%{customdata[0]}</b><br>"
@@ -325,6 +325,33 @@ def _RoadmapTimeline(
             ),
             connectgaps=False,
         ))
+
+    # Add task title as white text centred inside each bar.
+    # Estimate how many characters fit by assuming ~1400 px plot width and ~5.0 px/char at size 10.
+    if rows:
+        _all_d = [dt_date.fromisoformat(r["start"]) for r in rows] + [
+            dt_date.fromisoformat(r["end"]) for r in rows
+        ]
+        _total_days = max(1, (max(_all_d) - min(_all_d)).days)
+        _plot_w_px = 1400
+        _char_w_px = 5.0
+        for row in rows:
+            _s = dt_date.fromisoformat(row["start"])
+            _e = dt_date.fromisoformat(row["end"])
+            _mid = _s + timedelta(days=(_e - _s).days // 2)
+            _bar_px = (_e - _s).days / _total_days * _plot_w_px
+            _max_chars = max(2, int(_bar_px / _char_w_px))
+            _t = row["title"]
+            _bar_text = (_t[: _max_chars - 1] + "…") if len(_t) > _max_chars else _t
+            fig.add_annotation(
+                x=_mid.isoformat(),
+                y=row["label"],
+                text=_bar_text,
+                showarrow=False,
+                font=dict(size=10, color="white"),
+                xanchor="center",
+                yanchor="middle",
+            )
 
     today = utc_today_iso()
     fig.add_vline(
@@ -381,7 +408,7 @@ def _RoadmapTimeline(
                 bgcolor="rgba(255,255,255,0.92)",
                 bordercolor="rgba(0,0,0,0)",
             )
-    height = max(440, 100 + len(labels) * 34)
+    height = max(440, 100 + len(labels) * 46)
 
     fig.update_layout(
         template="primer_light",
