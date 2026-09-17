@@ -327,19 +327,22 @@ def _RoadmapTimeline(
         ))
 
     # Add task title as white text centred inside each bar.
-    # Estimate how many characters fit by assuming ~1400 px plot width and ~5.0 px/char at size 10.
+    # Use conservative estimates: plot width minus margins and y-axis area, ~7 px/char at
+    # size 10 (Plotly default font), and subtract a fixed per-side padding so the text
+    # doesn't touch the bar edges.
     if rows:
         _all_d = [dt_date.fromisoformat(r["start"]) for r in rows] + [
             dt_date.fromisoformat(r["end"]) for r in rows
         ]
         _total_days = max(1, (max(_all_d) - min(_all_d)).days)
-        _plot_w_px = 1400
-        _char_w_px = 5.0
+        _plot_w_px = 1050   # conservative: total width minus left/right margins and y-axis
+        _char_w_px = 7.0    # size-10 Plotly default font is ~7 px wide per character
+        _bar_pad_px = 16    # horizontal padding inside each bar (both sides combined)
         for row in rows:
             _s = dt_date.fromisoformat(row["start"])
             _e = dt_date.fromisoformat(row["end"])
             _mid = _s + timedelta(days=(_e - _s).days // 2)
-            _bar_px = (_e - _s).days / _total_days * _plot_w_px
+            _bar_px = max(0, (_e - _s).days / _total_days * _plot_w_px - _bar_pad_px)
             _max_chars = max(2, int(_bar_px / _char_w_px))
             _t = row["title"]
             _bar_text = (_t[: _max_chars - 1] + "…") if len(_t) > _max_chars else _t
